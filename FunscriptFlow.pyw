@@ -9,11 +9,206 @@ from tkinter import filedialog, messagebox
 import tkinter.ttk as ttk
 from multiprocessing import Pool
 from datetime import datetime
+import asyncio
+from queue import Queue, Empty
+from typing import List, Tuple, Optional, Dict
+import numpy.typing as npt
 
 
 # ---------- Constants ----------
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".m4v", ".webm", ".wmv", ".flv", ".mpg", ".mpeg", ".ts"}
 SUPPORTED_VIDEO_PATTERNS = " ".join(f"*{ext}" for ext in sorted(SUPPORTED_VIDEO_EXTENSIONS))
+
+# ---------- Async Video Reader with Buffering ----------
+class AsyncVideoReader:
+    """High-performance async video reader with frame buffering and parallel decoding."""
+    
+    def __init__(self, video_path: str, width: Optional[int] = None, height: Optional[int] = None, 
+                 num_threads: int = 4, buffer_size: int = 100):
+        self.video_path = video_path
+        self.width = width
+        self.height = height
+        self.num_threads = min(num_threads, 4)  # Limit decoder threads
+        self.buffer_size = buffer_size
+        
+        # Test video can be opened
+        test_cap = cv2.VideoCapture(video_path)
+        if not test_cap.isOpened():
+            raise Exception(f"Cannot open video: {video_path}")
+        
+        self.total_frames = int(test_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.fps = test_cap.get(cv2.CAP_PROP_FPS)
+        self.orig_width = int(test_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.orig_height = int(test_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        test_cap.release()
+        
+        # Frame buffer and memory pool
+        self.frame_buffer = Queue(maxsize=buffer_size)
+        self.frame_pool = Queue()
+        
+        # Pre-allocate frame buffers
+        for _ in range(buffer_size):
+            if self.width and self.height:
+                frame = np.empty((self.height, self.width, 3), dtype=np.uint8)
+            else:
+                frame = np.empty((self.orig_height, self.orig_width, 3), dtype=np.uint8)
+            self.frame_pool.put(frame)
+        
+        # Decoder threads and state
+        self.decoders = []
+        self.decoder_locks = []
+        self.stop_event = threading.Event()
+        self.prefetch_thread = None
+        
+        # Initialize multiple decoders
+        for i in range(self.num_threads):
+            cap = cv2.VideoCapture(video_path)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimal internal buffering
+            self.decoders.append(cap)
+            self.decoder_locks.append(threading.Lock())
+    
+    def __len__(self):
+        return self.total_frames
+    
+    def get_avg_fps(self):
+        return self.fps
+    
+    def _get_frame_buffer(self) -> np.ndarray:
+        """Get a frame buffer from the pool or allocate a new one."""
+        try:
+            return self.frame_pool.get_nowait()
+        except Empty:
+            if self.width and self.height:
+                return np.empty((self.height, self.width, 3), dtype=np.uint8)
+            else:
+                return np.empty((self.orig_height, self.orig_width, 3), dtype=np.uint8)
+    
+    def _return_frame_buffer(self, frame: np.ndarray):
+        """Return a frame buffer to the pool."""
+        try:
+            self.frame_pool.put_nowait(frame)
+        except:
+            pass  # Pool is full, let GC handle it
+    
+    def _decode_frame(self, idx: int, decoder_id: int) -> Optional[np.ndarray]:
+        """Decode a single frame using the specified decoder."""
+        with self.decoder_locks[decoder_id]:
+            cap = self.decoders[decoder_id]
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap.read()
+            
+            if ret:
+                # Convert BGR to RGB in-place
+                cv2.cvtColor(frame, cv2.COLOR_BGR2RGB, frame)
+                
+                # Resize if needed
+                if self.width and self.height and (frame.shape[1] != self.width or frame.shape[0] != self.height):
+                    frame = cv2.resize(frame, (self.width, self.height))
+                
+                return frame
+            return None
+    
+    def _prefetch_worker(self, indices: List[int]):
+        """Worker thread that prefetches frames into the buffer."""
+        decoder_id = 0
+        
+        for idx in indices:
+            if self.stop_event.is_set():
+                break
+            
+            frame = self._decode_frame(idx, decoder_id)
+            if frame is not None:
+                self.frame_buffer.put((idx, frame))
+            
+            # Round-robin through decoders
+            decoder_id = (decoder_id + 1) % self.num_threads
+    
+    def get_batch(self, indices: List[int]) -> np.ndarray:
+        """Get a batch of frames by indices with parallel decoding."""
+        frames = [None] * len(indices)
+        
+        # Start prefetch thread
+        self.stop_event.clear()
+        self.prefetch_thread = threading.Thread(target=self._prefetch_worker, args=(indices,))
+        self.prefetch_thread.start()
+        
+        # Collect frames from buffer
+        received = 0
+        timeout = 10.0  # seconds
+        
+        while received < len(indices):
+            try:
+                idx, frame = self.frame_buffer.get(timeout=timeout)
+                # Find position in indices
+                try:
+                    pos = indices.index(idx)
+                    frames[pos] = frame
+                    received += 1
+                except ValueError:
+                    # Frame not in requested indices, return to pool
+                    self._return_frame_buffer(frame)
+            except Empty:
+                break
+        
+        # Stop prefetch and wait
+        self.stop_event.set()
+        if self.prefetch_thread:
+            self.prefetch_thread.join()
+        
+        # Fill any missing frames with black
+        for i, frame in enumerate(frames):
+            if frame is None:
+                if self.width and self.height:
+                    frames[i] = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+                else:
+                    frames[i] = np.zeros((self.orig_height, self.orig_width, 3), dtype=np.uint8)
+        
+        return np.array(frames)
+    
+    def get_batch_parallel(self, indices: List[int]) -> np.ndarray:
+        """Alternative parallel batch reading using thread pool."""
+        frames = [None] * len(indices)
+        
+        def decode_with_id(args):
+            idx, pos, decoder_id = args
+            frame = self._decode_frame(idx, decoder_id)
+            return pos, frame
+        
+        # Distribute indices across decoders
+        tasks = []
+        for i, idx in enumerate(indices):
+            decoder_id = i % self.num_threads
+            tasks.append((idx, i, decoder_id))
+        
+        # Decode in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.num_threads) as executor:
+            futures = [executor.submit(decode_with_id, task) for task in tasks]
+            
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    pos, frame = future.result()
+                    frames[pos] = frame
+                except Exception as e:
+                    pass
+        
+        # Fill missing frames
+        for i, frame in enumerate(frames):
+            if frame is None:
+                if self.width and self.height:
+                    frames[i] = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+                else:
+                    frames[i] = np.zeros((self.orig_height, self.orig_width, 3), dtype=np.uint8)
+        
+        return np.array(frames)
+    
+    def __del__(self):
+        self.stop_event.set()
+        if self.prefetch_thread:
+            self.prefetch_thread.join()
+        
+        for cap in self.decoders:
+            if cap:
+                cap.release()
 
 # ---------- OpenCV VideoReader wrapper to replace decord ----------
 class VideoReaderCV:
@@ -405,8 +600,15 @@ def precompute_wrapper(p, params):
 def fetch_frames(video_path, chunk, params):
     frames_gray = []
     try:
-        vr = VideoReaderCV(video_path, num_threads=params["threads"], width=512 if params.get("vr_mode") else 256, height=512 if params.get("vr_mode") else 256)
-        batch_frames = vr.get_batch(chunk)
+        # Use AsyncVideoReader for better performance
+        vr = AsyncVideoReader(
+            video_path, 
+            num_threads=min(params["threads"], 4),  # Limit decoder threads
+            width=512 if params.get("vr_mode") else 256, 
+            height=512 if params.get("vr_mode") else 256,
+            buffer_size=min(len(chunk), 100)  # Adaptive buffer size
+        )
+        batch_frames = vr.get_batch_parallel(chunk)  # Use parallel decoding
     except Exception as e:
         return frames_gray
     vr = None
@@ -420,6 +622,49 @@ def fetch_frames(video_path, chunk, params):
             gray = cv2.cvtColor(f, cv2.COLOR_RGB2GRAY)
         frames_gray.append(gray)
 
+    return frames_gray
+
+
+def fetch_frames_optimized(video_path: str, chunk: List[int], params: Dict) -> List[np.ndarray]:
+    """Optimized frame fetching with direct grayscale conversion."""
+    frames_gray = []
+    
+    try:
+        # Don't resize if we're going to crop anyway in VR mode
+        target_size = None if params.get("vr_mode") else (256, 256)
+        
+        vr = AsyncVideoReader(
+            video_path,
+            num_threads=min(params["threads"], 4),
+            width=target_size[0] if target_size else None,
+            height=target_size[1] if target_size else None,
+            buffer_size=min(len(chunk), 100)
+        )
+        
+        # Process in smaller sub-batches for better memory efficiency
+        sub_batch_size = 50
+        for i in range(0, len(chunk), sub_batch_size):
+            sub_chunk = chunk[i:i + sub_batch_size]
+            batch_frames = vr.get_batch_parallel(sub_chunk)
+            
+            for f in batch_frames:
+                if params.get("vr_mode"):
+                    # For VR mode, resize then crop and convert
+                    f_resized = cv2.resize(f, (512, 512))
+                    h, w = 512, 512
+                    # Direct grayscale conversion of the cropped region
+                    gray = cv2.cvtColor(f_resized[h // 2:, :w // 2], cv2.COLOR_RGB2GRAY)
+                else:
+                    # Direct grayscale conversion
+                    gray = cv2.cvtColor(f, cv2.COLOR_RGB2GRAY)
+                frames_gray.append(gray)
+                
+    except Exception as e:
+        return frames_gray
+    finally:
+        vr = None
+        gc.collect()
+    
     return frames_gray
 
 # ---------- Main Processing Function ----------
@@ -465,7 +710,8 @@ def process_video(video_path, params, log_func, progress_callback=None, cancel_f
     velocity = np.zeros(2, dtype=float)
     final_flow_list = []
 
-    next_batch = None
+    # Use a queue for prefetching instead of global variable
+    prefetch_queue = Queue(maxsize=1)
     fetch_thread = None
     # We'll collect color frames for preview
     # (and grayscale for computing flow).
@@ -481,24 +727,36 @@ def process_video(video_path, params, log_func, progress_callback=None, cancel_f
         if len(chunk) < 2:
             continue
 
-        # Start fetching the next batch while processing the current one
-        if fetch_thread:
-            fetch_thread.join()  # Ensure previous fetch is complete
-            frames_gray = next_batch if next_batch is not None else fetch_frames(video_path, chunk, params)
-            next_batch = None  # Clear next_batch after using it
-        else:
-            frames_gray = fetch_frames(video_path, chunk, params)
+        # Get frames from prefetch queue or fetch directly
+        frames_gray = None
+        if fetch_thread and fetch_thread.is_alive():
+            try:
+                frames_gray = prefetch_queue.get(timeout=30.0)
+            except Empty:
+                log_func(f"WARNING: Prefetch timeout for chunk {chunk_start}")
+        
+        if frames_gray is None:
+            frames_gray = fetch_frames_optimized(video_path, chunk, params)
 
         if not frames_gray:
             log_func(f"ERROR: Unable to fetch frames for chunk {chunk_start} - skipping.")
             continue
+        
+        # Start prefetching next batch
         if chunk_start + bracket_size < len(indices):
             next_chunk = indices[chunk_start + bracket_size:chunk_start + 2 * bracket_size]
-            def fetch_and_store():
-                global next_batch
-                next_batch = fetch_frames(video_path, next_chunk, params)
-
-            fetch_thread = threading.Thread(target=fetch_and_store)
+            
+            def prefetch_worker(path, chunk_data, params_data, queue):
+                try:
+                    frames = fetch_frames_optimized(path, chunk_data, params_data)
+                    queue.put(frames)
+                except Exception as e:
+                    queue.put([])  # Put empty list on error
+            
+            fetch_thread = threading.Thread(
+                target=prefetch_worker,
+                args=(video_path, next_chunk, params, prefetch_queue)
+            )
             fetch_thread.start()
 
         # Build consecutive pairs
@@ -556,6 +814,17 @@ def process_video(video_path, params, log_func, progress_callback=None, cancel_f
         if progress_callback:
             prog = min(100, int(100 * (chunk_start + len(chunk)) / len(indices)))
             progress_callback(prog)
+
+    # Clean up prefetch thread if still running
+    if fetch_thread and fetch_thread.is_alive():
+        fetch_thread.join(timeout=5.0)
+    
+    # Clear the prefetch queue
+    while not prefetch_queue.empty():
+        try:
+            prefetch_queue.get_nowait()
+        except Empty:
+            break
 
     # --- Piecewise Integration and Timestamping 
     cum_flow = [0]
