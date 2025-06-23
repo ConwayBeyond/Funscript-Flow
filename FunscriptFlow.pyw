@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import gc
-import os, math, threading, concurrent.futures, json, argparse
+import os, math, threading, concurrent.futures, json, argparse, time
 import numpy as np
 import cv2
 import tkinter as tk
@@ -18,6 +18,77 @@ import numpy.typing as npt
 # ---------- Constants ----------
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".m4v", ".webm", ".wmv", ".flv", ".mpg", ".mpeg", ".ts"}
 SUPPORTED_VIDEO_PATTERNS = " ".join(f"*{ext}" for ext in sorted(SUPPORTED_VIDEO_EXTENSIONS))
+
+# ---------- GPU Backend Detection ----------
+def get_available_backends() -> Dict[str, bool]:
+    """Detect available GPU acceleration backends."""
+    backends = {
+        "CPU": True,  # Always available
+        "CUDA": False,
+        "OpenCL": False,
+        "DNN": False
+    }
+    
+    # Check for CUDA support
+    try:
+        if hasattr(cv2.cuda, 'getCudaEnabledDeviceCount'):
+            device_count = cv2.cuda.getCudaEnabledDeviceCount()
+            backends["CUDA"] = device_count > 0
+    except Exception:
+        pass
+    
+    # Check for OpenCL support
+    try:
+        if hasattr(cv2.ocl, 'haveOpenCL'):
+            backends["OpenCL"] = cv2.ocl.haveOpenCL()
+    except Exception:
+        pass
+    
+    # Check for DNN backend support
+    try:
+        if hasattr(cv2, 'dnn'):
+            backends["DNN"] = True
+    except Exception:
+        pass
+    
+    return backends
+
+def get_gpu_info() -> str:
+    """Get information about available GPUs and backends."""
+    info = []
+    backends = get_available_backends()
+    
+    # CUDA info with device details
+    try:
+        if backends["CUDA"] and hasattr(cv2.cuda, 'getCudaEnabledDeviceCount'):
+            count = cv2.cuda.getCudaEnabledDeviceCount()
+            if count > 0:
+                device_names = []
+                for i in range(count):
+                    try:
+                        name = cv2.cuda.getDeviceName(i)
+                        device_names.append(name)
+                    except Exception:
+                        device_names.append(f"Device {i}")
+                if len(device_names) == 1:
+                    info.append(f"CUDA: {device_names[0]}")
+                else:
+                    info.append(f"CUDA: {len(device_names)} devices")
+    except Exception:
+        pass
+    
+    # OpenCL info (simplified)
+    if backends["OpenCL"]:
+        info.append("OpenCL supported")
+    
+    # DNN info
+    if backends["DNN"]:
+        info.append("DNN module available")
+    
+    if not info:
+        return "CPU only"
+    
+    return " | ".join(info)
 
 # ---------- Async Video Reader with Buffering ----------
 class AsyncVideoReader:
@@ -523,6 +594,29 @@ def precompute_flow_info(p0, p1, config):
       - pick a center for cut jumps (could just use pos_center)
     Returns a dict with everything needed for final pass.
     """
+    # Try to use the selected backend
+    backend = config.get("backend", "CPU")
+    
+    if backend == "CUDA":
+        try:
+            return precompute_flow_info_gpu(p0, p1, config.get("cut_threshold", 7))
+        except Exception as e:
+            # Fall back to CPU if GPU fails
+            pass
+    elif backend == "OpenCL":
+        try:
+            return precompute_flow_info_opencl(p0, p1, config)
+        except Exception as e:
+            # Fall back to CPU if OpenCL fails
+            pass
+    elif backend == "DNN":
+        try:
+            return precompute_flow_info_dnn(p0, p1, config)
+        except Exception as e:
+            # Fall back to CPU if DNN fails
+            pass
+    
+    # CPU implementation (default)
     cut_threshold = config.get("cut_threshold", 7)
     
     flow = cv2.calcOpticalFlowFarneback(p0, p1, None,
@@ -556,7 +650,80 @@ def precompute_flow_info(p0, p1, config):
         "mean_mag": mean_mag
     }
 
-def precompute_flow_info_gpu(p0, p1, cut_threshold=7):
+def precompute_flow_info_opencl(p0, p1, config):
+    """OpenCL-accelerated optical flow computation using UMat."""
+    cut_threshold = config.get("cut_threshold", 7)
+    
+    # Convert to UMat for GPU processing
+    gpu_p0 = cv2.UMat(p0)
+    gpu_p1 = cv2.UMat(p1)
+    
+    # Compute optical flow on GPU
+    flow_gpu = cv2.calcOpticalFlowFarneback(gpu_p0, gpu_p1, None,
+                                            0.5, 3, 15, 3, 5, 1.2, 0)
+    
+    # Get flow back to CPU
+    flow = flow_gpu.get()
+    
+    # Compute divergence on CPU (could be optimized further)
+    if config.get("pov_mode"):
+        max_val = (p0.shape[1] // 2, p0.shape[0] - 1, 0)
+    else:
+        max_val = max_divergence(flow)
+    pos_center = max_val[0:2]
+    val_pos = max_val[2]
+    
+    # Calculate magnitude
+    mag, ang = cv2.cartToPolar(flow[...,0], flow[...,1])
+    mean_mag = np.mean(mag)
+    is_cut = mean_mag > cut_threshold
+    
+    return {
+        "flow": flow,
+        "pos_center": pos_center,
+        "neg_center": pos_center,
+        "val_pos": val_pos,
+        "val_neg": val_pos,
+        "cut": is_cut,
+        "cut_center": pos_center[0],
+        "mean_mag": mean_mag
+    }
+
+def precompute_flow_info_dnn(p0, p1, config):
+    """DNN-accelerated optical flow using DisFlow algorithm."""
+    cut_threshold = config.get("cut_threshold", 7)
+    
+    # Use DIS optical flow (faster than Farneback)
+    dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_FAST)
+    
+    # Compute flow
+    flow = dis.calc(p0, p1, None)
+    
+    # Rest is same as CPU version
+    if config.get("pov_mode"):
+        max_val = (p0.shape[1] // 2, p0.shape[0] - 1, 0)
+    else:
+        max_val = max_divergence(flow)
+    pos_center = max_val[0:2]
+    val_pos = max_val[2]
+    
+    # Calculate magnitude
+    mag, ang = cv2.cartToPolar(flow[...,0], flow[...,1])
+    mean_mag = np.mean(mag)
+    is_cut = mean_mag > cut_threshold
+    
+    return {
+        "flow": flow,
+        "pos_center": pos_center,
+        "neg_center": pos_center,
+        "val_pos": val_pos,
+        "val_neg": val_pos,
+        "cut": is_cut,
+        "cut_center": pos_center[0],
+        "mean_mag": mean_mag
+    }
+
+def precompute_flow_info_gpu(p0, p1, cut_threshold):
     # Upload frames to GPU—time to let your GPU do the heavy lifting!
     gpu_p0 = cv2.cuda_GpuMat()
     gpu_p1 = cv2.cuda_GpuMat()
@@ -677,6 +844,7 @@ def process_video(video_path, params, log_func, progress_callback=None, cancel_f
       4) In a final concurrency step, computes radial_flow with the final center
          (and sign) for each pair.
     """
+    start_time = time.time()
     error_occurred = False
     base, _ = os.path.splitext(video_path)
     output_path = base + ".funscript"
@@ -704,6 +872,7 @@ def process_video(video_path, params, log_func, progress_callback=None, cancel_f
     effective_fps = fps / step
     indices = list(range(0, total_frames, step))
     log_func(f"FPS: {fps:.2f}; downsampled to ~{effective_fps:.2f} fps; {len(indices)} frames selected.")
+    log_func(f"Using backend: {params.get('backend', 'CPU')}")
     bracket_size = int(params.get("batch_size", 3000.0))
 
     center = None
@@ -959,6 +1128,11 @@ def process_video(video_path, params, log_func, progress_callback=None, cancel_f
     except Exception as e:
         log_func(STRINGS["log_error"].format(error=str(e)))
         error_occurred = True
+    
+    # Log processing time
+    elapsed_time = time.time() - start_time
+    log_func(f"Processing time: {elapsed_time:.2f} seconds")
+    
     return error_occurred
 
 # ---------- Sine Fit ------------
@@ -1221,6 +1395,64 @@ class App:
         self.create_param(self.adv_frame, STRINGS["norm_window"], "norm_window", "4", "Time window to calibrate motion range (seconds). Shorter values amplify motion, but also cause artifacts in long thrusts.")
         self.create_param(self.adv_frame, STRINGS["batch_size"], "batch_size", "3000", "Number of frames to process per batch (Higher values will be faster, but also take more RAM).")
         
+        # GPU Backend selection
+        backend_frame = tk.Frame(self.adv_frame)
+        backend_frame.pack(fill=tk.X, padx=5, pady=2)
+        tk.Label(backend_frame, text="Processing Backend:", width=25, anchor=tk.W).pack(side=tk.LEFT)
+        
+        self.backends = get_available_backends()
+        self.backend_var = tk.StringVar(value="CPU")
+        
+        # Create custom dropdown that shows all options with availability
+        self.backend_menu = ttk.Combobox(backend_frame, textvariable=self.backend_var, 
+                                        state="readonly", width=20)
+        
+        # Format backend options to show availability
+        backend_display = []
+        self.available_backends = []
+        for backend, available in [("CPU", True), ("CUDA", self.backends["CUDA"]), 
+                                   ("OpenCL", self.backends["OpenCL"]), ("DNN", self.backends["DNN"])]:
+            if available:
+                backend_display.append(backend)
+                self.available_backends.append(backend)
+            else:
+                backend_display.append(f"{backend} (unavailable)")
+        
+        self.backend_menu['values'] = backend_display
+        self.backend_menu.pack(side=tk.LEFT, padx=5)
+        
+        # Store previous selection
+        self.previous_backend = "CPU"
+        
+        # Bind selection event to prevent selecting unavailable options
+        def on_backend_select(event):
+            selected = self.backend_var.get()
+            if "(unavailable)" in selected:
+                # Reset to previous valid selection
+                self.backend_var.set(self.previous_backend)
+                self.backend_menu.selection_clear()
+                # Show message why it's unavailable
+                backend_name = selected.replace(" (unavailable)", "")
+                if backend_name == "CUDA":
+                    messagebox.showinfo("Backend Unavailable", 
+                                      "CUDA backend requires an NVIDIA GPU and OpenCV built with CUDA support.")
+                elif backend_name == "OpenCL":
+                    messagebox.showinfo("Backend Unavailable", 
+                                      "OpenCL backend requires OpenCV built with OpenCL support.")
+                elif backend_name == "DNN":
+                    messagebox.showinfo("Backend Unavailable", 
+                                      "DNN backend requires OpenCV built with DNN module support.")
+            else:
+                self.previous_backend = selected
+        
+        self.backend_menu.bind('<<ComboboxSelected>>', on_backend_select)
+        
+        # GPU info label
+        self.gpu_info_label = tk.Label(backend_frame, text=get_gpu_info(), fg="gray")
+        self.gpu_info_label.pack(side=tk.LEFT, padx=10)
+        
+        ToolTip(self.backend_menu, "Select processing backend. GPU acceleration can significantly speed up processing.\nUnavailable options require specific hardware or OpenCV build configuration.")
+        
         self.keyframe_reduction = tk.BooleanVar(value=True)
         chk_keyframe = tk.Checkbutton(self.adv_frame, text=STRINGS["chk_keyframe"] if "chk_keyframe" in STRINGS else "Enable keyframe reduction", variable=self.keyframe_reduction)
         chk_keyframe.pack(anchor=tk.W, padx=5, pady=2)
@@ -1305,6 +1537,7 @@ class App:
         config["overwrite"] = self.overwrite.get()
         config["vr_mode"] = self.vr_mode.get()
         config["pov_mode"] = self.pov_mode.get()
+        config["backend"] = self.backend_var.get()
         
         config_path = "config.json"
         try:
@@ -1327,6 +1560,8 @@ class App:
                 self.overwrite.set(config.get("overwrite", False))
                 self.vr_mode.set(config.get("vr_mode", False))
                 self.pov_mode.set(config.get("pov_mode", False))
+                if "backend" in config and config["backend"] in self.available_backends:
+                    self.backend_var.set(config["backend"])
                 
             except Exception as e:
                 messagebox.showwarning("Config Load", STRINGS["config_load_error"].format(error=str(e)))
@@ -1368,6 +1603,7 @@ class App:
             }
             settings["vr_mode"] = self.vr_mode.get()
             settings["pov_mode"] = self.pov_mode.get()
+            settings["backend"] = self.backend_var.get()
         except Exception as e:
             messagebox.showerror("Parameter Error", f"Invalid parameters: {e}")
             return
@@ -1392,6 +1628,8 @@ class App:
         total_files = len(self.files)
         self.error_occurred = False
         def worker():
+            batch_start_time = time.time()
+            
             for idx, video in enumerate(self.files):
                 if self.cancel_event.is_set():
                     self.log(STRINGS["cancelled_by_user"])
@@ -1405,15 +1643,31 @@ class App:
                     self.error_occurred = True
                 overall = int(100 * (idx + 1) / total_files)
                 self.update_overall_progress(overall)
-            self.log(STRINGS["batch_processing_complete"])
+            
+            # Calculate and format total time
+            total_time = time.time() - batch_start_time
+            hours = int(total_time // 3600)
+            minutes = int((total_time % 3600) // 60)
+            seconds = int(total_time % 60)
+            
+            if hours > 0:
+                time_str = f"{hours}h {minutes}m {seconds}s"
+            elif minutes > 0:
+                time_str = f"{minutes}m {seconds}s"
+            else:
+                time_str = f"{seconds}s"
+            
+            self.log(f"{STRINGS['batch_processing_complete']} Total time: {time_str}")
             if self.log_file:
                 self.log_file.close()
             enable_widgets(self.master)
+            
+            # Update completion messages to include time
             if self.error_occurred:
-                if messagebox.askyesno("Run Finished", STRINGS["processing_completed_with_errors"] + "\nWould you like to view the log?"):
+                if messagebox.askyesno("Run Finished", f"{STRINGS['processing_completed_with_errors']}\nCompleted in {time_str}\n\nWould you like to view the log?"):
                     show_log_dialog(self.master, self.log_messages)
             else:
-                if messagebox.askyesno("Run Finished", "Batch processing complete.\nWould you like to view the log?"):
+                if messagebox.askyesno("Run Finished", f"Batch processing complete.\nCompleted in {time_str}\n\nWould you like to view the log?"):
                     show_log_dialog(self.master, self.log_messages)
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1511,6 +1765,7 @@ if __name__ == '__main__':
     parser.add_argument("--vr_mode", action="store_true", help="Enable VR Mode (if not set, non‑VR mode is used)")
     parser.add_argument("--pov_mode", action="store_true", help="Enable POV Mode (improves stability for POV videos)")
     parser.add_argument("--disable_keyframe_reduction", action="store_false", help="Disable keyframe reduction")
+    parser.add_argument("--backend", choices=["CPU", "CUDA", "OpenCL", "DNN"], default="CPU", help="Processing backend (default: CPU)")
     args = parser.parse_args()
     settings = {
         "threads": args.threads,
@@ -1520,7 +1775,8 @@ if __name__ == '__main__':
         "overwrite": args.overwrite,
         "vr_mode": args.vr_mode,
         "pov_mode": args.pov_mode,
-        "keyframe_reduction": not args.disable_keyframe_reduction
+        "keyframe_reduction": not args.disable_keyframe_reduction,
+        "backend": args.backend
     }
     if args.input:
         run_headless(args.input, settings)
