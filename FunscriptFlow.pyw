@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import tkinter.ttk as ttk
 from multiprocessing import Pool
+from datetime import datetime
 
 
 # ---------- OpenCV VideoReader wrapper to replace decord ----------
@@ -968,6 +969,7 @@ class App:
         self.btn_cancel.pack(side=tk.LEFT, padx=5)
         
         self.log_file = None
+        self.log_messages = []  # Store log messages in memory
         self.error_occurred = False
         self.load_config()
         self.toggle_advanced()
@@ -1077,8 +1079,10 @@ class App:
         self.cancel_event.set()
     
     def log(self, msg):
-        self.log_file.write(msg + "\n")
-        self.log_file.flush()
+        self.log_messages.append(msg)  # Store in memory
+        if self.log_file:
+            self.log_file.write(msg + "\n")
+            self.log_file.flush()
         
     def run_batch(self):
         if not self.files:
@@ -1101,20 +1105,15 @@ class App:
             return
         
         self.cancel_event.clear()
+        self.log_messages = []  # Clear previous log messages
         try:
-            # Open a log file in appdata
-            log_path = None
-            # Open a log file in appdata in windows, or /tmp in linux
-            if os.name == "posix":
-                log_path = "/tmp"
-            else:
-                # Windows
-                if not os.getenv("APPDATA"):
-                    messagebox.showerror("Log Error", "APPDATA environment variable not set.")
-                    return
-                log_path = os.path.join(os.getenv("APPDATA"), "FunscriptFlow")
+            # Create logs folder in the current directory
+            log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
             os.makedirs(log_path, exist_ok=True)
-            log_filename = os.path.join(log_path, "run.log")
+            
+            # Create timestamp-based filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_filename = os.path.join(log_path, f"{timestamp}.log")
             self.log_file = open(log_filename, "w")
         except Exception as e:
             messagebox.showerror("Log Error", f"Cannot open log file: {e}")
@@ -1139,18 +1138,46 @@ class App:
                 overall = int(100 * (idx + 1) / total_files)
                 self.update_overall_progress(overall)
             self.log(STRINGS["batch_processing_complete"])
-            self.log_file.close()
+            if self.log_file:
+                self.log_file.close()
             enable_widgets(self.master)
             if self.error_occurred:
-                if messagebox.askyesno("Run Finished", STRINGS["processing_completed_with_errors"] + "\nWould you like to open the log?"):
-                    open_log(log_filename)
+                if messagebox.askyesno("Run Finished", STRINGS["processing_completed_with_errors"] + "\nWould you like to view the log?"):
+                    show_log_dialog(self.master, self.log_messages)
             else:
-                if messagebox.askyesno("Run Finished", "Batch processing complete.\nSee run.log for details.\nWould you like to open the log?"):
-                    open_log(log_filename)
+                if messagebox.askyesno("Run Finished", "Batch processing complete.\nWould you like to view the log?"):
+                    show_log_dialog(self.master, self.log_messages)
         threading.Thread(target=worker, daemon=True).start()
 
-def open_log(log_filename):
-    os.startfile(log_filename)
+def show_log_dialog(parent, log_messages):
+    """Show log messages in a scrollable dialog"""
+    log_window = tk.Toplevel(parent)
+    log_window.title("Processing Log")
+    log_window.geometry("800x600")
+    
+    # Create frame for text widget and scrollbar
+    frame = tk.Frame(log_window)
+    frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    
+    # Create scrollbar
+    scrollbar = tk.Scrollbar(frame)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
+    # Create text widget
+    log_text = tk.Text(frame, wrap=tk.WORD, yscrollcommand=scrollbar.set)
+    log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    scrollbar.config(command=log_text.yview)
+    
+    # Insert log messages
+    for msg in log_messages:
+        log_text.insert(tk.END, msg + "\n")
+    
+    # Make text read-only
+    log_text.config(state=tk.DISABLED)
+    
+    # Add close button
+    close_btn = tk.Button(log_window, text="Close", command=log_window.destroy)
+    close_btn.pack(pady=5)
     
 def disable_widgets_except(widget, exceptions):
     if widget not in exceptions:
