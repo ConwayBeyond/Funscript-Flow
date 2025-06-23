@@ -1,0 +1,12 @@
+[project]
+name = "funscript-flow"
+version = "1.0.0"
+description = "Computer vision-based automatic funscript generation"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy",
+    "opencv-python",
+]
+
+[project.optional-dependencies]
+build = ["nuitka", "imageio"]
