@@ -455,14 +455,10 @@ def process_video(video_path, params, log_func, progress_callback=None, cancel_f
         log_func(f"ERROR: Unable to read video properties: {e}")
         return True
 
-    step = max(1, int(math.ceil(fps / 15.0)))
+    step = max(1, int(math.ceil(fps / 30.0)))
     effective_fps = fps / step
     indices = list(range(0, total_frames, step))
     log_func(f"FPS: {fps:.2f}; downsampled to ~{effective_fps:.2f} fps; {len(indices)} frames selected.")
-
-     
-    step = max(1, int(math.ceil(fps / 30.0)))
-    indices = list(range(0, total_frames, step))
     bracket_size = int(params.get("batch_size", 3000.0))
 
     center = None
