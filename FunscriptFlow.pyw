@@ -11,6 +11,10 @@ from multiprocessing import Pool
 from datetime import datetime
 
 
+# ---------- Constants ----------
+SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".m4v", ".webm", ".wmv", ".flv", ".mpg", ".mpeg", ".ts"}
+SUPPORTED_VIDEO_PATTERNS = " ".join(f"*{ext}" for ext in sorted(SUPPORTED_VIDEO_EXTENSIONS))
+
 # ---------- OpenCV VideoReader wrapper to replace decord ----------
 class VideoReaderCV:
     def __init__(self, video_path, width=None, height=None, num_threads=None):
@@ -987,7 +991,7 @@ class App:
     
     def select_files(self):
         files = filedialog.askopenfilenames(title=STRINGS["select_videos"],
-                    filetypes=[("Video Files", "*.mp4 *.avi *.mov *.mkv *.m4v"), ("All Files", "*.*")])
+                    filetypes=[("Video Files", SUPPORTED_VIDEO_PATTERNS), ("All Files", "*.*")])
         if files:
             self.files = list(files)
             self.lbl_files.config(text=f"{len(self.files)} file(s) selected")
@@ -998,12 +1002,11 @@ class App:
     def select_folder(self):
         folder = filedialog.askdirectory(title=STRINGS["select_folder"])
         if folder:
-            video_exts = {".mp4", ".avi", ".mov", ".mkv", ".m4v"}
             found = []
             for root, dirs, files in os.walk(folder):
                 for f in files:
                     ext = os.path.splitext(f)[1].lower()
-                    if ext in video_exts:
+                    if ext in SUPPORTED_VIDEO_EXTENSIONS:
                         found.append(os.path.join(root, f))
             self.files = found
             self.lbl_files.config(text=f"{len(self.files)} file(s) found in folder")
@@ -1209,12 +1212,11 @@ def run_headless(input_path, settings):
         logf.flush()
         print(msg)
     if os.path.isdir(input_path):
-        video_exts = {".mp4", ".avi", ".mov", ".mkv"}
         files = []
         for root, dirs, files_in in os.walk(input_path):
             for f in files_in:
                 ext = os.path.splitext(f)[1].lower()
-                if ext in video_exts:
+                if ext in SUPPORTED_VIDEO_EXTENSIONS:
                     files.append(os.path.join(root, f))
     else:
         files = [input_path]
