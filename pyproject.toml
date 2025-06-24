@@ -6,6 +6,8 @@ requires-python = ">=3.13"
 dependencies = [
     "numpy",
     "opencv-python",
+    "PySide6",
+    "matplotlib",
 ]
 
 [project.optional-dependencies]

@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 
 import gc
-import os, math, threading, concurrent.futures, json, argparse, time
+import os, math, threading, concurrent.futures, json, argparse, time, sys
 import numpy as np
 import cv2
-import tkinter as tk
-from tkinter import filedialog, messagebox
-import tkinter.ttk as ttk
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+                               QPushButton, QLabel, QCheckBox, QProgressBar, QLineEdit, 
+                               QFileDialog, QMessageBox, QTextEdit, QDialog, QComboBox,
+                               QFrame, QScrollArea, QTabWidget, QSlider, QGroupBox, QFormLayout)
+from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QPixmap, QIcon, QFont
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimediaWidgets import QVideoWidget
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 from multiprocessing import Pool
 from datetime import datetime
 import asyncio
@@ -380,42 +388,249 @@ STRINGS = load_strings()
 
 # ---------- Tooltip Implementation ----------
 class ToolTip:
-    """Simple tooltip for a widget."""
+    """Simple tooltip for Qt widgets using setToolTip."""
     def __init__(self, widget, text="widget info"):
-        self.widget = widget
-        self.text = text
-        self.tipwindow = None
-        widget.bind("<Enter>", self.enter)
-        widget.bind("<Leave>", self.leave)
-    def enter(self, event=None):
-        self.showtip()
-    def leave(self, event=None):
-        self.hidetip()
-    def showtip(self):
-        if self.tipwindow:
-            return
-        if not self.text or not self.text.strip():
-            return
+        widget.setToolTip(text)
+
+class FunscriptVisualizerWidget(QWidget):
+    """Widget for visualizing funscript data in real-time."""
+    def __init__(self):
+        super().__init__()
+        self.layout = QVBoxLayout(self)
+        
+        # Create matplotlib figure and canvas
+        self.figure = Figure(figsize=(12, 4), dpi=100)
+        self.canvas = FigureCanvas(self.figure)
+        self.layout.addWidget(self.canvas)
+        
+        # Create the plot
+        self.ax = self.figure.add_subplot(111)
+        self.ax.set_xlim(0, 100)  # Will be updated with actual data
+        self.ax.set_ylim(0, 100)
+        self.ax.set_xlabel('Time (seconds)')
+        self.ax.set_ylabel('Position (0-100)')
+        self.ax.set_title('Funscript Visualization')
+        self.ax.grid(True, alpha=0.3)
+        
+        # Data storage
+        self.funscript_data = None
+        self.current_time = 0
+        self.line = None
+        self.current_marker = None
+        
+    def load_funscript(self, funscript_path):
+        """Load funscript data from file."""
         try:
-            x, y, cx, cy = self.widget.bbox("insert")
-            x = x + self.widget.winfo_rootx() + 25
-            y = y + cy + self.widget.winfo_rooty() + 25
-        except:
-            x = self.widget.winfo_rootx() + 25
-            y = self.widget.winfo_rooty() + 25
-        self.tipwindow = tw = tk.Toplevel(self.widget)
-        tw.wm_overrideredirect(True)
-        tw.wm_geometry("+%d+%d" % (x, y))
-        label = tk.Label(tw, text=self.text, justify=tk.LEFT,
-                         background="#ffffe0", foreground="#000000", relief=tk.SOLID, borderwidth=1,
-                         font=("Helvetica", "10", "normal"), wraplength=300)
-        label.pack(ipadx=5, ipady=3)
-        tw.update_idletasks()
-        tw.lift()
-    def hidetip(self):
-        if self.tipwindow:
-            self.tipwindow.destroy()
-        self.tipwindow = None
+            with open(funscript_path, 'r') as f:
+                data = json.load(f)
+            
+            self.funscript_data = data['actions']
+            
+            # Extract time and position data
+            times = [action['at'] / 1000.0 for action in self.funscript_data]  # Convert ms to seconds
+            positions = [action['pos'] for action in self.funscript_data]
+            
+            # Update plot
+            self.ax.clear()
+            self.ax.set_xlabel('Time (seconds)')
+            self.ax.set_ylabel('Position (0-100)')
+            self.ax.set_title('Funscript Visualization')
+            self.ax.grid(True, alpha=0.3)
+            
+            if times:
+                self.ax.set_xlim(0, max(times))
+                self.line, = self.ax.plot(times, positions, 'b-', linewidth=2, alpha=0.7)
+                self.current_marker, = self.ax.plot([], [], 'ro', markersize=8)
+            
+            self.canvas.draw()
+            
+        except Exception as e:
+            print(f"Error loading funscript: {e}")
+    
+    def update_current_time(self, time_seconds):
+        """Update the current time marker on the plot."""
+        self.current_time = time_seconds
+        
+        if self.current_marker is not None and self.funscript_data:
+            # Find the closest action point for interpolation
+            closest_pos = 50  # Default position
+            
+            # Linear interpolation between adjacent points
+            for i in range(len(self.funscript_data) - 1):
+                t1 = self.funscript_data[i]['at'] / 1000.0
+                t2 = self.funscript_data[i + 1]['at'] / 1000.0
+                
+                if t1 <= time_seconds <= t2:
+                    p1 = self.funscript_data[i]['pos']
+                    p2 = self.funscript_data[i + 1]['pos']
+                    # Linear interpolation
+                    ratio = (time_seconds - t1) / (t2 - t1) if t2 != t1 else 0
+                    closest_pos = p1 + ratio * (p2 - p1)
+                    break
+            
+            self.current_marker.set_data([time_seconds], [closest_pos])
+            self.canvas.draw_idle()
+
+class VideoPlayerWidget(QWidget):
+    """Video player widget with funscript synchronization."""
+    timeChanged = Signal(float)  # Emits current time in seconds
+    
+    def __init__(self):
+        super().__init__()
+        self.layout = QVBoxLayout(self)
+        
+        # Video widget
+        self.video_widget = QVideoWidget()
+        self.layout.addWidget(self.video_widget)
+        
+        # Media player
+        self.media_player = QMediaPlayer()
+        self.audio_output = QAudioOutput()
+        self.media_player.setAudioOutput(self.audio_output)
+        self.media_player.setVideoOutput(self.video_widget)
+        
+        # Controls
+        self.controls_layout = QHBoxLayout()
+        
+        self.play_button = QPushButton("Play")
+        self.play_button.clicked.connect(self.toggle_play)
+        self.controls_layout.addWidget(self.play_button)
+        
+        self.position_slider = QSlider(Qt.Horizontal)
+        self.position_slider.sliderMoved.connect(self.set_position)
+        self.controls_layout.addWidget(self.position_slider)
+        
+        self.time_label = QLabel("00:00 / 00:00")
+        self.controls_layout.addWidget(self.time_label)
+        
+        self.layout.addLayout(self.controls_layout)
+        
+        # Connect signals
+        self.media_player.durationChanged.connect(self.duration_changed)
+        self.media_player.positionChanged.connect(self.position_changed)
+        self.media_player.playbackStateChanged.connect(self.state_changed)
+        
+    def load_video(self, video_path):
+        """Load a video file."""
+        self.media_player.setSource(QUrl.fromLocalFile(video_path))
+        
+    def toggle_play(self):
+        """Toggle play/pause."""
+        if self.media_player.playbackState() == QMediaPlayer.PlayingState:
+            self.media_player.pause()
+        else:
+            self.media_player.play()
+    
+    def set_position(self, position):
+        """Set playback position."""
+        self.media_player.setPosition(position)
+    
+    def duration_changed(self, duration):
+        """Update slider maximum when duration changes."""
+        self.position_slider.setMaximum(duration)
+        
+    def position_changed(self, position):
+        """Update UI when position changes."""
+        self.position_slider.setValue(position)
+        
+        # Update time label
+        current_time = self.format_time(position)
+        total_time = self.format_time(self.media_player.duration())
+        self.time_label.setText(f"{current_time} / {total_time}")
+        
+        # Emit time changed signal for synchronization
+        self.timeChanged.emit(position / 1000.0)  # Convert ms to seconds
+        
+    def state_changed(self, state):
+        """Update play button text when state changes."""
+        if state == QMediaPlayer.PlayingState:
+            self.play_button.setText("Pause")
+        else:
+            self.play_button.setText("Play")
+    
+    def format_time(self, milliseconds):
+        """Format time in mm:ss format."""
+        seconds = milliseconds // 1000
+        minutes = seconds // 60
+        seconds = seconds % 60
+        return f"{minutes:02d}:{seconds:02d}"
+
+class VideoPlayerDialog(QDialog):
+    """Dialog for video playback with funscript visualization."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Video Player with Funscript Visualization")
+        self.setModal(False)
+        self.resize(1200, 800)
+        
+        # Application icon is inherited from QApplication
+        
+        layout = QVBoxLayout(self)
+        
+        # Create splitter for video and visualization
+        splitter_widget = QWidget()
+        splitter_layout = QHBoxLayout(splitter_widget)
+        
+        # Video section
+        video_section = QWidget()
+        video_layout = QVBoxLayout(video_section)
+        video_layout.addWidget(QLabel("Video Player"))
+        
+        self.video_player = VideoPlayerWidget()
+        video_layout.addWidget(self.video_player)
+        
+        # Visualization section
+        viz_section = QWidget()
+        viz_layout = QVBoxLayout(viz_section)
+        viz_layout.addWidget(QLabel("Funscript Visualization"))
+        
+        self.funscript_visualizer = FunscriptVisualizerWidget()
+        viz_layout.addWidget(self.funscript_visualizer)
+        
+        # Add sections to splitter
+        splitter_layout.addWidget(video_section, 1)  # Video takes more space
+        splitter_layout.addWidget(viz_section, 1)
+        
+        layout.addWidget(splitter_widget)
+        
+        # Connect video time changes to visualization updates
+        self.video_player.timeChanged.connect(self.funscript_visualizer.update_current_time)
+        
+        # File loading controls
+        controls_layout = QHBoxLayout()
+        
+        load_video_btn = QPushButton("Load Video")
+        load_video_btn.clicked.connect(self.load_video)
+        controls_layout.addWidget(load_video_btn)
+        
+        load_funscript_btn = QPushButton("Load Funscript")
+        load_funscript_btn.clicked.connect(self.load_funscript)
+        controls_layout.addWidget(load_funscript_btn)
+        
+        layout.addLayout(controls_layout)
+        
+    def load_video(self):
+        """Load a video file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open Video File", "", 
+            "Video Files (*.mp4 *.avi *.mov *.mkv *.m4v *.webm *.wmv *.flv *.mpg *.mpeg *.ts);;All Files (*)"
+        )
+        if file_path:
+            self.video_player.load_video(file_path)
+    
+    def load_funscript(self):
+        """Load a funscript file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open Funscript File", "", 
+            "Funscript Files (*.funscript);;JSON Files (*.json);;All Files (*)"
+        )
+        if file_path:
+            self.funscript_visualizer.load_funscript(file_path)
+    
+    def load_video_and_funscript(self, video_path, funscript_path):
+        """Load both video and funscript files."""
+        self.video_player.load_video(video_path)
+        self.funscript_visualizer.load_funscript(funscript_path)
 
 def detect_cut(pair, log_func=None, threshold=30):
     return False
@@ -1323,97 +1538,238 @@ def convert_frame_to_photo(frame):
         return None
 
 # ---------- GUI Code ----------
-def disable_widgets_except(widget, exceptions):
-    if widget not in exceptions:
-        try:
-            widget.configure(state="disabled")
-        except tk.TclError:
-            pass
-    for child in widget.winfo_children():
-        disable_widgets_except(child, exceptions)
+# Old tkinter helper functions removed - no longer needed with PySide6
 
-def enable_widgets(widget):
-    try:
-        widget.configure(state="normal")
-    except tk.TclError:
-        pass
-    for child in widget.winfo_children():
-        enable_widgets(child)
-
-class App:
-    def __init__(self, master):
-        self.master = master
-        master.title(STRINGS["app_title"])
-        icon = tk.PhotoImage(file="icon.png")
-        master.iconphoto(False, icon)
-        self.files = []
+class WorkerThread(QThread):
+    """Thread for processing videos in background."""
+    progressChanged = Signal(int)
+    videoProgressChanged = Signal(int)
+    finished = Signal(bool, str, list)  # error_occurred, time_str, log_messages
+    logMessage = Signal(str)
+    
+    def __init__(self, files, settings):
+        super().__init__()
+        self.files = files
+        self.settings = settings
         self.cancel_event = threading.Event()
-        self.error_occurred = False
-        self.preview_window = None
-        self.preview_label = None
-        self.show_preview = tk.BooleanVar(value=False)
-        self.show_adv = tk.BooleanVar(value=False)
+        self.log_messages = []
+        self.log_file = None
         
-        top_frame = tk.Frame(master)
-        top_frame.pack(fill=tk.X, padx=5, pady=5)
-        btn_sel_files = tk.Button(top_frame, text=STRINGS["select_videos"], command=self.select_files)
-        btn_sel_files.pack(side=tk.LEFT, padx=2)
-        btn_sel_folder = tk.Button(top_frame, text=STRINGS["select_folder"], command=self.select_folder)
-        btn_sel_folder.pack(side=tk.LEFT, padx=2)
-        self.lbl_files = tk.Label(top_frame, text=STRINGS["no_files_selected"])
-        self.lbl_files.pack(side=tk.LEFT, padx=10)
-        btn_readme = tk.Button(top_frame, text=STRINGS["readme"], command=self.show_readme)
-        btn_readme.pack(side=tk.RIGHT, padx=2)
+    def log(self, msg):
+        self.log_messages.append(msg)
+        if self.log_file:
+            self.log_file.write(msg + "\n")
+            self.log_file.flush()
+        self.logMessage.emit(msg)
+    
+    def cancel(self):
+        self.cancel_event.set()
+    
+    def run(self):
+        error_occurred = False
         
-        mode_frame = tk.Frame(master)
-        mode_frame.pack(fill=tk.X, padx=5, pady=2)
-        self.vr_mode = tk.BooleanVar(value=False)
-        chk_vr = tk.Checkbutton(mode_frame, text=STRINGS["vr_mode"], variable=self.vr_mode)
-        chk_vr.pack(side=tk.LEFT, padx=2)
-        ToolTip(chk_vr, STRINGS["vr_mode_tooltip"])
-        chk_preview = tk.Checkbutton(mode_frame, text=STRINGS["show_preview"], variable=self.show_preview)
-        #chk_preview.pack(side=tk.LEFT, padx=2)
-        self.pov_mode = tk.BooleanVar(value=False)
-        chk_pov = tk.Checkbutton(mode_frame, text="POV Mode", variable=self.pov_mode)
-        chk_pov.pack(side=tk.LEFT, padx=2)
-        ToolTip(chk_pov, STRINGS["pov_mode_tooltip"])
+        try:
+            # Create logs folder
+            log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+            os.makedirs(log_path, exist_ok=True)
+            
+            # Create timestamp-based filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_filename = os.path.join(log_path, f"{timestamp}.log")
+            self.log_file = open(log_filename, "w")
+        except Exception as e:
+            self.finished.emit(True, "0s", [f"Cannot open log file: {e}"])
+            return
+            
+        batch_start_time = time.time()
+        total_files = len(self.files)
         
-        adv_toggle_frame = tk.Frame(master)
-        adv_toggle_frame.pack(fill=tk.X, padx=5, pady=2)
-        chk_adv = tk.Checkbutton(adv_toggle_frame, text=STRINGS["show_advanced"] if "show_advanced" in STRINGS else "Show Advanced Settings", variable=self.show_adv, command=self.toggle_advanced)
-        chk_adv.pack(side=tk.LEFT, padx=2)
+        for idx, video in enumerate(self.files):
+            if self.cancel_event.is_set():
+                self.log(STRINGS["cancelled_by_user"])
+                break
+                
+            self.videoProgressChanged.emit(0)
+            err = process_video(video, self.settings, self.log,
+                              progress_callback=lambda prog: self.videoProgressChanged.emit(prog),
+                              cancel_flag=lambda: self.cancel_event.is_set())
+            if err:
+                error_occurred = True
+                
+            overall = int(100 * (idx + 1) / total_files)
+            self.progressChanged.emit(overall)
         
-        prog_frame = tk.Frame(master)
-        prog_frame.pack(fill=tk.X, padx=5, pady=5)
-        tk.Label(prog_frame, text=STRINGS["overall_progress"]).pack(anchor=tk.W)
-        self.overall_progress = ttk.Progressbar(prog_frame, orient="horizontal", mode="determinate", maximum=100)
-        self.overall_progress.pack(fill=tk.X, padx=5, pady=2)
-        tk.Label(prog_frame, text=STRINGS["current_video_progress"]).pack(anchor=tk.W)
-        self.video_progress = ttk.Progressbar(prog_frame, orient="horizontal", mode="determinate", maximum=100)
-        self.video_progress.pack(fill=tk.X, padx=5, pady=2)
+        # Calculate and format total time
+        total_time = time.time() - batch_start_time
+        hours = int(total_time // 3600)
+        minutes = int((total_time % 3600) // 60)
+        seconds = int(total_time % 60)
         
-        self.adv_frame = tk.LabelFrame(master, text=STRINGS["advanced_settings"])
-        self.adv_frame.pack(fill=tk.X, padx=5, pady=5)
+        if hours > 0:
+            time_str = f"{hours}h {minutes}m {seconds}s"
+        elif minutes > 0:
+            time_str = f"{minutes}m {seconds}s"
+        else:
+            time_str = f"{seconds}s"
+        
+        self.log(f"{STRINGS['batch_processing_complete']} Total time: {time_str}")
+        if self.log_file:
+            self.log_file.close()
+            
+        self.finished.emit(error_occurred, time_str, self.log_messages)
+
+class App(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(STRINGS["app_title"])
+        self.setGeometry(100, 100, 800, 600)
+        
+        # Application icon is set at QApplication level
+        
+        # Central widget with tabs
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        
+        layout = QVBoxLayout(central_widget)
+        
+        # Initialize variables first
+        self.files = []
+        self.worker_thread = None
         self.params = {}
+        self.backends = get_available_backends()
+        self.available_backends = []
+        
+        # Create tab widget
+        self.tab_widget = QTabWidget()
+        layout.addWidget(self.tab_widget)
+        
+        # Funscript Generation Tab
+        self.generation_tab = QWidget()
+        self.tab_widget.addTab(self.generation_tab, "Funscript Generation")
+        self.setup_generation_tab()
+        
+        # Video Player Tab
+        self.player_tab = VideoPlayerDialog()
+        self.tab_widget.addTab(self.player_tab, "Video Player & Visualizer")
+        
+        # Load configuration
+        self.load_config()
+        
+    def setup_generation_tab(self):
+        """Setup the funscript generation tab."""
+        layout = QVBoxLayout(self.generation_tab)
+        
+        # File selection section
+        file_group = QGroupBox("File Selection")
+        file_layout = QHBoxLayout(file_group)
+        
+        self.btn_select_files = QPushButton(STRINGS["select_videos"])
+        self.btn_select_files.clicked.connect(self.select_files)
+        file_layout.addWidget(self.btn_select_files)
+        
+        self.btn_select_folder = QPushButton(STRINGS["select_folder"])
+        self.btn_select_folder.clicked.connect(self.select_folder)
+        file_layout.addWidget(self.btn_select_folder)
+        
+        self.lbl_files = QLabel(STRINGS["no_files_selected"])
+        file_layout.addWidget(self.lbl_files)
+        
+        file_layout.addStretch()
+        
+        self.btn_readme = QPushButton(STRINGS["readme"])
+        self.btn_readme.clicked.connect(self.show_readme)
+        file_layout.addWidget(self.btn_readme)
+        
+        layout.addWidget(file_group)
+        
+        # Mode selection section
+        mode_group = QGroupBox("Mode Selection")
+        mode_layout = QHBoxLayout(mode_group)
+        
+        self.chk_vr = QCheckBox(STRINGS["vr_mode"])
+        ToolTip(self.chk_vr, STRINGS["vr_mode_tooltip"])
+        mode_layout.addWidget(self.chk_vr)
+        
+        self.chk_pov = QCheckBox("POV Mode")
+        ToolTip(self.chk_pov, STRINGS["pov_mode_tooltip"])
+        mode_layout.addWidget(self.chk_pov)
+        
+        mode_layout.addStretch()
+        layout.addWidget(mode_group)
+        
+        # Progress section
+        progress_group = QGroupBox("Progress")
+        progress_layout = QVBoxLayout(progress_group)
+        
+        progress_layout.addWidget(QLabel(STRINGS["overall_progress"]))
+        self.overall_progress = QProgressBar()
+        self.overall_progress.setRange(0, 100)
+        progress_layout.addWidget(self.overall_progress)
+        
+        progress_layout.addWidget(QLabel(STRINGS["current_video_progress"]))
+        self.video_progress = QProgressBar()
+        self.video_progress.setRange(0, 100)
+        progress_layout.addWidget(self.video_progress)
+        
+        layout.addWidget(progress_group)
+        
+        # Advanced settings section (collapsible)
+        self.adv_group = QGroupBox(STRINGS["advanced_settings"])
+        self.adv_group.setCheckable(True)
+        self.adv_group.setChecked(False)
+        self.setup_advanced_settings()
+        layout.addWidget(self.adv_group)
+        
+        # Control buttons
+        button_layout = QHBoxLayout()
+        
+        self.btn_run = QPushButton(STRINGS["run"])
+        self.btn_run.clicked.connect(self.run_batch)
+        button_layout.addWidget(self.btn_run)
+        
+        self.btn_cancel = QPushButton(STRINGS["cancel"])
+        self.btn_cancel.clicked.connect(self.cancel_run)
+        self.btn_cancel.setEnabled(False)
+        button_layout.addWidget(self.btn_cancel)
+        
+        # Add Preview Generated Funscript button
+        self.btn_preview = QPushButton("Preview Generated Funscript")
+        self.btn_preview.clicked.connect(self.preview_funscript)
+        button_layout.addWidget(self.btn_preview)
+        
+        button_layout.addStretch()
+        layout.addLayout(button_layout)
+        
+        layout.addStretch()
+        
+    def setup_advanced_settings(self):
+        """Setup advanced settings form."""
+        layout = QFormLayout(self.adv_group)
+        
         # Get the number of cores available
         num_cores = os.cpu_count()
-        self.create_param(self.adv_frame, STRINGS["threads"], "threads", str(num_cores), "Number of threads used for optical flow computation.")
-        self.create_param(self.adv_frame, STRINGS["detrend_window"], "detrend_window", "1.5", "Controls the aggressiveness of drift removal. See readme for detail.  Recommended: 1-10, higher values for more stable cameras.")
         
-        self.create_param(self.adv_frame, STRINGS["norm_window"], "norm_window", "4", "Time window to calibrate motion range (seconds). Shorter values amplify motion, but also cause artifacts in long thrusts.")
-        self.create_param(self.adv_frame, STRINGS["batch_size"], "batch_size", "3000", "Number of frames to process per batch (Higher values will be faster, but also take more RAM).")
+        # Create parameter inputs
+        self.params = {}
+        
+        self.params["threads"] = QLineEdit(str(num_cores))
+        ToolTip(self.params["threads"], "Number of threads used for optical flow computation.")
+        layout.addRow(STRINGS["threads"], self.params["threads"])
+        
+        self.params["detrend_window"] = QLineEdit("1.5")
+        ToolTip(self.params["detrend_window"], "Controls the aggressiveness of drift removal. See readme for detail. Recommended: 1-10, higher values for more stable cameras.")
+        layout.addRow(STRINGS["detrend_window"], self.params["detrend_window"])
+        
+        self.params["norm_window"] = QLineEdit("4")
+        ToolTip(self.params["norm_window"], "Time window to calibrate motion range (seconds). Shorter values amplify motion, but also cause artifacts in long thrusts.")
+        layout.addRow(STRINGS["norm_window"], self.params["norm_window"])
+        
+        self.params["batch_size"] = QLineEdit("3000")
+        ToolTip(self.params["batch_size"], "Number of frames to process per batch (Higher values will be faster, but also take more RAM).")
+        layout.addRow(STRINGS["batch_size"], self.params["batch_size"])
         
         # GPU Backend selection
-        backend_frame = tk.Frame(self.adv_frame)
-        backend_frame.pack(fill=tk.X, padx=5, pady=2)
-        tk.Label(backend_frame, text="Processing Backend:", width=25, anchor=tk.W).pack(side=tk.LEFT)
-        
-        self.backends = get_available_backends()
-        self.backend_var = tk.StringVar(value="CPU")
-        
-        # Create custom dropdown that shows all options with availability
-        self.backend_menu = ttk.Combobox(backend_frame, textvariable=self.backend_var, 
-                                        state="readonly", width=20)
+        self.backend_combo = QComboBox()
         
         # Format backend options to show availability
         backend_display = []
@@ -1426,86 +1782,35 @@ class App:
             else:
                 backend_display.append(f"{backend} (unavailable)")
         
-        self.backend_menu['values'] = backend_display
-        self.backend_menu.pack(side=tk.LEFT, padx=5)
+        self.backend_combo.addItems(backend_display)
+        self.backend_combo.setCurrentText("CPU")
+        ToolTip(self.backend_combo, "Select processing backend. GPU acceleration can significantly speed up processing.\nUnavailable options require specific hardware or OpenCV build configuration.")
+        layout.addRow("Processing Backend:", self.backend_combo)
         
-        # Store previous selection
-        self.previous_backend = "CPU"
+        # Checkboxes
+        self.chk_keyframe = QCheckBox("Enable keyframe reduction")
+        self.chk_keyframe.setChecked(True)
+        layout.addRow(self.chk_keyframe)
         
-        # Bind selection event to prevent selecting unavailable options
-        def on_backend_select(event):
-            selected = self.backend_var.get()
-            if "(unavailable)" in selected:
-                # Reset to previous valid selection
-                self.backend_var.set(self.previous_backend)
-                self.backend_menu.selection_clear()
-                # Show message why it's unavailable
-                backend_name = selected.replace(" (unavailable)", "")
-                if backend_name == "CUDA":
-                    messagebox.showinfo("Backend Unavailable", 
-                                      "CUDA backend requires an NVIDIA GPU and OpenCV built with CUDA support.")
-                elif backend_name == "OpenCL":
-                    messagebox.showinfo("Backend Unavailable", 
-                                      "OpenCL backend requires OpenCV built with OpenCL support.")
-                elif backend_name == "DNN":
-                    messagebox.showinfo("Backend Unavailable", 
-                                      "DNN backend requires OpenCV built with DNN module support.")
-            else:
-                self.previous_backend = selected
+        self.chk_overwrite = QCheckBox(STRINGS["overwrite_files"])
+        layout.addRow(self.chk_overwrite)
         
-        self.backend_menu.bind('<<ComboboxSelected>>', on_backend_select)
-        
-        # GPU info label
-        self.gpu_info_label = tk.Label(backend_frame, text=get_gpu_info(), fg="gray")
-        self.gpu_info_label.pack(side=tk.LEFT, padx=10)
-        
-        ToolTip(self.backend_menu, "Select processing backend. GPU acceleration can significantly speed up processing.\nUnavailable options require specific hardware or OpenCV build configuration.")
-        
-        self.keyframe_reduction = tk.BooleanVar(value=True)
-        chk_keyframe = tk.Checkbutton(self.adv_frame, text=STRINGS["chk_keyframe"] if "chk_keyframe" in STRINGS else "Enable keyframe reduction", variable=self.keyframe_reduction)
-        chk_keyframe.pack(anchor=tk.W, padx=5, pady=2)
-        #ToolTip(chk_keyframe, STRINGS["keyframe_tooltip"])
-        
-        self.overwrite = tk.BooleanVar(value=False)
-        chk_overwrite = tk.Checkbutton(self.adv_frame, text=STRINGS["overwrite_files"], variable=self.overwrite)
-        chk_overwrite.pack(anchor=tk.W, padx=5, pady=2)
-        
-        btn_frame = tk.Frame(master)
-        btn_frame.pack(padx=5, pady=5)
-        btn_run = tk.Button(btn_frame, text=STRINGS["run"], command=self.run_batch)
-        btn_run.pack(side=tk.LEFT, padx=5)
-        self.btn_cancel = tk.Button(btn_frame, text=STRINGS["cancel"], command=self.cancel_run)
-        self.btn_cancel.pack(side=tk.LEFT, padx=5)
-        
-        self.log_file = None
-        self.log_messages = []  # Store log messages in memory
-        self.error_occurred = False
-        self.load_config()
-        self.toggle_advanced()
-    
-    def create_param(self, parent, label_text, key, default, tooltip_text):
-        frm = tk.Frame(parent)
-        frm.pack(fill=tk.X, padx=5, pady=2)
-        lbl = tk.Label(frm, text=label_text, width=25, anchor=tk.W)
-        lbl.pack(side=tk.LEFT)
-        entry = tk.Entry(frm)
-        entry.insert(0, default)
-        entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.params[key] = entry
-        ToolTip(entry, tooltip_text)
-    
     def select_files(self):
-        files = filedialog.askopenfilenames(title=STRINGS["select_videos"],
-                    filetypes=[("Video Files", SUPPORTED_VIDEO_PATTERNS), ("All Files", "*.*")])
+        """Select video files."""
+        files, _ = QFileDialog.getOpenFileNames(
+            self, STRINGS["select_videos"], "",
+            "Video Files (*.mp4 *.avi *.mov *.mkv *.m4v *.webm *.wmv *.flv *.mpg *.mpeg *.ts);;All Files (*)"
+        )
         if files:
-            self.files = list(files)
-            self.lbl_files.config(text=f"{len(self.files)} file(s) selected")
+            self.files = files
+            self.lbl_files.setText(f"{len(self.files)} file(s) selected")
         else:
             self.files = []
-            self.lbl_files.config(text=STRINGS["no_files_selected"])
+            self.lbl_files.setText(STRINGS["no_files_selected"])
     
     def select_folder(self):
-        folder = filedialog.askdirectory(title=STRINGS["select_folder"])
+        """Select folder containing videos."""
+        folder = QFileDialog.getExistingDirectory(self, STRINGS["select_folder"])
         if folder:
             found = []
             for root, dirs, files in os.walk(folder):
@@ -1514,217 +1819,170 @@ class App:
                     if ext in SUPPORTED_VIDEO_EXTENSIONS:
                         found.append(os.path.join(root, f))
             self.files = found
-            self.lbl_files.config(text=f"{len(self.files)} file(s) found in folder")
+            self.lbl_files.setText(f"{len(self.files)} file(s) found in folder")
     
     def show_readme(self):
+        """Show readme in a dialog."""
         try:
             with open("readme.txt", "r", encoding="utf-8") as f:
                 content = f.read()
         except Exception as e:
             content = f"Error reading readme.txt: {e}"
-        win = tk.Toplevel(self.master)
-        win.title("Readme")
-        txt = tk.Text(win, wrap=tk.WORD)
-        txt.insert(tk.END, content)
-        txt.pack(fill=tk.BOTH, expand=True)
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Readme")
+        dialog.setModal(False)
+        dialog.resize(600, 400)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        
+        layout = QVBoxLayout(dialog)
+        text_edit = QTextEdit()
+        text_edit.setPlainText(content)
+        text_edit.setReadOnly(True)
+        layout.addWidget(text_edit)
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.close)
+        layout.addWidget(close_btn)
+        
+        dialog.show()
     
-    def update_preview(self, frame):
-        photo = convert_frame_to_photo(frame)
-        if photo is None:
-            return
-        if self.preview_window is None:
-            self.preview_window = tk.Toplevel(self.master)
-            self.preview_window.title("Preview")
-            self.preview_label = tk.Label(self.preview_window)
-            self.preview_label.pack()
-        self.preview_label.configure(image=photo)
-        self.preview_label.image = photo
+    def preview_funscript(self):
+        """Open the video player tab to preview generated funscripts."""
+        self.tab_widget.setCurrentIndex(1)  # Switch to video player tab
     
     def save_config(self):
-        config = { key: self.params[key].get() for key in self.params }
-        config["overwrite"] = self.overwrite.get()
-        config["vr_mode"] = self.vr_mode.get()
-        config["pov_mode"] = self.pov_mode.get()
-        config["backend"] = self.backend_var.get()
+        """Save configuration to file."""
+        config = {key: widget.text() for key, widget in self.params.items()}
+        config["overwrite"] = self.chk_overwrite.isChecked()
+        config["vr_mode"] = self.chk_vr.isChecked()
+        config["pov_mode"] = self.chk_pov.isChecked()
+        config["backend"] = self.backend_combo.currentText()
+        config["keyframe_reduction"] = self.chk_keyframe.isChecked()
         
         config_path = "config.json"
         try:
             with open(config_path, "w") as f:
                 json.dump(config, f, indent=2)
-            messagebox.showinfo("Config Saved", STRINGS["config_saved"].format(config_path=config_path))
+            QMessageBox.information(self, "Config Saved", STRINGS["config_saved"].format(config_path=config_path))
         except Exception as e:
-            messagebox.showerror("Error", f"Could not save config: {e}")
+            QMessageBox.critical(self, "Error", f"Could not save config: {e}")
     
     def load_config(self):
+        """Load configuration from file."""
         config_path = "config.json"
         if os.path.exists(config_path):
             try:
                 with open(config_path, "r") as f:
                     config = json.load(f)
-                for key in self.params:
-                    if key in config:
-                        self.params[key].delete(0, tk.END)
-                        self.params[key].insert(0, str(config[key]))
-                self.overwrite.set(config.get("overwrite", False))
-                self.vr_mode.set(config.get("vr_mode", False))
-                self.pov_mode.set(config.get("pov_mode", False))
-                if "backend" in config and config["backend"] in self.available_backends:
-                    self.backend_var.set(config["backend"])
+                
+                # Load after UI is set up
+                QTimer.singleShot(100, lambda: self._load_config_values(config))
                 
             except Exception as e:
-                messagebox.showwarning("Config Load", STRINGS["config_load_error"].format(error=str(e)))
+                QMessageBox.warning(self, "Config Load", STRINGS["config_load_error"].format(error=str(e)))
     
-    def toggle_advanced(self):
-        if self.show_adv.get():
-            self.adv_frame.pack(fill=tk.X, padx=5, pady=5)
-        else:
-            self.adv_frame.forget()
-    
-    def update_video_progress(self, prog):
-        self.master.after(0, lambda: self.video_progress.configure(value=prog))
-    
-    def update_overall_progress(self, prog):
-        self.master.after(0, lambda: self.overall_progress.configure(value=prog))
-    
-    def cancel_run(self):
-        self.cancel_event.set()
-    
-    def log(self, msg):
-        self.log_messages.append(msg)  # Store in memory
-        if self.log_file:
-            self.log_file.write(msg + "\n")
-            self.log_file.flush()
+    def _load_config_values(self, config):
+        """Helper to load config values after UI setup."""
+        for key, widget in self.params.items():
+            if key in config:
+                widget.setText(str(config[key]))
         
+        if "overwrite" in config:
+            self.chk_overwrite.setChecked(config["overwrite"])
+        if "vr_mode" in config:
+            self.chk_vr.setChecked(config["vr_mode"])
+        if "pov_mode" in config:
+            self.chk_pov.setChecked(config["pov_mode"])
+        if "keyframe_reduction" in config:
+            self.chk_keyframe.setChecked(config["keyframe_reduction"])
+        if "backend" in config and config["backend"] in self.available_backends:
+            self.backend_combo.setCurrentText(config["backend"])
+    
     def run_batch(self):
+        """Start batch processing."""
         if not self.files:
-            messagebox.showwarning("No files", STRINGS["no_files_warning"])
+            QMessageBox.warning(self, "No files", STRINGS["no_files_warning"])
             return
+        
         try:
             settings = {
-                "threads": int(self.params["threads"].get()),
-                "detrend_window": float(self.params["detrend_window"].get()),
-                
-                "norm_window": float(self.params["norm_window"].get()),
-                "batch_size": int(self.params["batch_size"].get()),
-                "overwrite": self.overwrite.get(),
-                "keyframe_reduction": self.keyframe_reduction.get()
+                "threads": int(self.params["threads"].text()),
+                "detrend_window": float(self.params["detrend_window"].text()),
+                "norm_window": float(self.params["norm_window"].text()),
+                "batch_size": int(self.params["batch_size"].text()),
+                "overwrite": self.chk_overwrite.isChecked(),
+                "keyframe_reduction": self.chk_keyframe.isChecked(),
+                "vr_mode": self.chk_vr.isChecked(),
+                "pov_mode": self.chk_pov.isChecked(),
+                "backend": self.backend_combo.currentText()
             }
-            settings["vr_mode"] = self.vr_mode.get()
-            settings["pov_mode"] = self.pov_mode.get()
-            settings["backend"] = self.backend_var.get()
         except Exception as e:
-            messagebox.showerror("Parameter Error", f"Invalid parameters: {e}")
+            QMessageBox.critical(self, "Parameter Error", f"Invalid parameters: {e}")
             return
         
-        self.cancel_event.clear()
-        self.log_messages = []  # Clear previous log messages
-        try:
-            # Create logs folder in the current directory
-            log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-            os.makedirs(log_path, exist_ok=True)
-            
-            # Create timestamp-based filename
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_filename = os.path.join(log_path, f"{timestamp}.log")
-            self.log_file = open(log_filename, "w")
-        except Exception as e:
-            messagebox.showerror("Log Error", f"Cannot open log file: {e}")
-            return
-        self.overall_progress.configure(value=0)
-        self.video_progress.configure(value=0)
-        disable_widgets_except(self.master, [self.btn_cancel])
-        total_files = len(self.files)
-        self.error_occurred = False
-        def worker():
-            batch_start_time = time.time()
-            
-            for idx, video in enumerate(self.files):
-                if self.cancel_event.is_set():
-                    self.log(STRINGS["cancelled_by_user"])
-                    break
-                self.update_video_progress(0)
-                err = process_video(video, settings, self.log,
-                              progress_callback=lambda prog: self.update_video_progress(prog),
-                              cancel_flag=lambda: self.cancel_event.is_set(),
-                              preview_callback=lambda frame: self.update_preview(frame) if self.show_preview.get() else None)
-                if err:
-                    self.error_occurred = True
-                overall = int(100 * (idx + 1) / total_files)
-                self.update_overall_progress(overall)
-            
-            # Calculate and format total time
-            total_time = time.time() - batch_start_time
-            hours = int(total_time // 3600)
-            minutes = int((total_time % 3600) // 60)
-            seconds = int(total_time % 60)
-            
-            if hours > 0:
-                time_str = f"{hours}h {minutes}m {seconds}s"
-            elif minutes > 0:
-                time_str = f"{minutes}m {seconds}s"
-            else:
-                time_str = f"{seconds}s"
-            
-            self.log(f"{STRINGS['batch_processing_complete']} Total time: {time_str}")
-            if self.log_file:
-                self.log_file.close()
-            enable_widgets(self.master)
-            
-            # Update completion messages to include time
-            if self.error_occurred:
-                if messagebox.askyesno("Run Finished", f"{STRINGS['processing_completed_with_errors']}\nCompleted in {time_str}\n\nWould you like to view the log?"):
-                    show_log_dialog(self.master, self.log_messages)
-            else:
-                if messagebox.askyesno("Run Finished", f"Batch processing complete.\nCompleted in {time_str}\n\nWould you like to view the log?"):
-                    show_log_dialog(self.master, self.log_messages)
-        threading.Thread(target=worker, daemon=True).start()
-
-def show_log_dialog(parent, log_messages):
-    """Show log messages in a scrollable dialog"""
-    log_window = tk.Toplevel(parent)
-    log_window.title("Processing Log")
-    log_window.geometry("800x600")
+        # Reset progress
+        self.overall_progress.setValue(0)
+        self.video_progress.setValue(0)
+        
+        # Disable controls
+        self.btn_run.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
+        
+        # Start worker thread
+        self.worker_thread = WorkerThread(self.files, settings)
+        self.worker_thread.progressChanged.connect(self.overall_progress.setValue)
+        self.worker_thread.videoProgressChanged.connect(self.video_progress.setValue)
+        self.worker_thread.finished.connect(self.on_batch_finished)
+        self.worker_thread.start()
     
-    # Create frame for text widget and scrollbar
-    frame = tk.Frame(log_window)
-    frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    def cancel_run(self):
+        """Cancel the running batch process."""
+        if self.worker_thread:
+            self.worker_thread.cancel()
     
-    # Create scrollbar
-    scrollbar = tk.Scrollbar(frame)
-    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    def on_batch_finished(self, error_occurred, time_str, log_messages):
+        """Handle batch processing completion."""
+        # Re-enable controls
+        self.btn_run.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
+        
+        # Show completion message
+        if error_occurred:
+            reply = QMessageBox.question(
+                self, "Run Finished", 
+                f"{STRINGS['processing_completed_with_errors']}\nCompleted in {time_str}\n\nWould you like to view the log?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+        else:
+            reply = QMessageBox.question(
+                self, "Run Finished", 
+                f"Batch processing complete.\nCompleted in {time_str}\n\nWould you like to view the log?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+        
+        if reply == QMessageBox.Yes:
+            self.show_log_dialog(log_messages)
     
-    # Create text widget
-    log_text = tk.Text(frame, wrap=tk.WORD, yscrollcommand=scrollbar.set)
-    log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    scrollbar.config(command=log_text.yview)
-    
-    # Insert log messages
-    for msg in log_messages:
-        log_text.insert(tk.END, msg + "\n")
-    
-    # Make text read-only
-    log_text.config(state=tk.DISABLED)
-    
-    # Add close button
-    close_btn = tk.Button(log_window, text="Close", command=log_window.destroy)
-    close_btn.pack(pady=5)
-    
-def disable_widgets_except(widget, exceptions):
-    if widget not in exceptions:
-        try:
-            widget.configure(state="disabled")
-        except tk.TclError:
-            pass
-    for child in widget.winfo_children():
-        disable_widgets_except(child, exceptions)
-
-def enable_widgets(widget):
-    try:
-        widget.configure(state="normal")
-    except tk.TclError:
-        pass
-    for child in widget.winfo_children():
-        enable_widgets(child)
+    def show_log_dialog(self, log_messages):
+        """Show log messages in a dialog."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Processing Log")
+        dialog.setModal(True)
+        dialog.resize(800, 600)
+        
+        layout = QVBoxLayout(dialog)
+        
+        text_edit = QTextEdit()
+        text_edit.setPlainText("\n".join(log_messages))
+        text_edit.setReadOnly(True)
+        layout.addWidget(text_edit)
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        
+        dialog.exec()
 
 # ---------- Headless Mode ----------
 def run_headless(input_path, settings):
@@ -1789,6 +2047,14 @@ if __name__ == '__main__':
     if args.input:
         run_headless(args.input, settings)
     else:
-        root = tk.Tk()
-        app = App(root)
-        root.mainloop()
+        app = QApplication(sys.argv)
+        
+        # Set application icon
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        icon_path = os.path.join(script_dir, "icon.png")
+        if os.path.exists(icon_path):
+            app.setWindowIcon(QIcon(icon_path))
+        
+        window = App()
+        window.show()
+        sys.exit(app.exec())
