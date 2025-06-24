@@ -391,7 +391,8 @@ STRINGS = load_strings()
 class ToolTip:
     """Simple tooltip for Qt widgets using setToolTip."""
     def __init__(self, widget, text="widget info"):
-        widget.setToolTip(text)
+        if widget and text:
+            widget.setToolTip(str(text))
 
 # ---------- FunScript Visualizer Widget ----------
 class FunScriptVisualizer(QWidget):
@@ -1212,6 +1213,12 @@ def process_video(video_path, params, log_func, progress_callback=None, cancel_f
             center = np.mean(center_list, axis=0)
             final_centers.append(center)
             
+            # Progress update during center computation
+            if progress_callback and j % 24 == 0:  # Update every 24 frames
+                frames_processed = chunk_start + j * 0.5  # Center computation is ~50% of processing
+                prog = min(100, int(100 * frames_processed / len(indices)))
+                progress_callback(prog)
+            
             # Show preview with the new center on the "next" color frame
             # e.g. color_pairs[j][1] is the "current" next frame
             # preview_frame = pairs[j][1].copy()
@@ -1233,8 +1240,14 @@ def process_video(video_path, params, log_func, progress_callback=None, cancel_f
             #flow_val = dot_val * signs[j]
             is_cut   = precomputed[j]["cut"]
             final_flow_list.append((dot_val, is_cut, frame_indices[j]))
+            
+            # More frequent progress updates within chunk processing
+            if progress_callback and j % 24 == 0:  # Update every 24 frames
+                frames_processed = chunk_start + j + 1
+                prog = min(100, int(100 * frames_processed / len(indices)))
+                progress_callback(prog)
 
-        # progress
+        # Final progress update for this chunk
         if progress_callback:
             prog = min(100, int(100 * (chunk_start + len(chunk)) / len(indices)))
             progress_callback(prog)
@@ -1623,11 +1636,11 @@ class WorkerThread(QThread):
                 break
                 
             self.videoProgressChanged.emit(0)
-            
+
             # Generate the expected output path
             base = os.path.splitext(video)[0]
             funscript_path = base + ".funscript"
-            
+
             err = process_video(video, self.settings, self.log,
                               progress_callback=lambda prog: self.videoProgressChanged.emit(prog),
                               cancel_flag=lambda: self.cancel_event.is_set())
@@ -2067,33 +2080,33 @@ class App(QMainWindow):
                     
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load FunScript: {e}")
-    
+
     def load_video_and_funscript_in_preview(self, video_path, funscript_path):
         """Load video and funscript in the preview tab and switch to it."""
         try:
             # Switch to preview tab
             self.tab_widget.setCurrentIndex(1)  # Preview tab is index 1
-            
+
             # Load video
             self.loaded_video_path = video_path
             self.media_player.setSource(QUrl.fromLocalFile(video_path))
-            
+
             # Load funscript if it exists
             if os.path.exists(funscript_path):
                 with open(funscript_path, 'r') as f:
                     self.loaded_funscript_data = json.load(f)
                 
                 self.funscript_visualizer.load_funscript(self.loaded_funscript_data)
-                
+
                 # If we have a video duration, update the visualizer
                 if self.media_player.duration() > 0:
                     self.funscript_visualizer.set_duration(self.media_player.duration())
-                    
+
             return True
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load video and funscript in preview: {e}")
             return False
-                
+
     def toggle_play_pause(self):
         """Toggle between play and pause states."""
         if self.media_player.playbackState() == QMediaPlayer.PlayingState:
@@ -2281,44 +2294,44 @@ class App(QMainWindow):
             message_box.setWindowTitle("Run Finished")
             message_box.setText(f"{STRINGS['processing_completed_with_errors']}\nCompleted in {time_str}")
             message_box.setStandardButtons(QMessageBox.NoButton)
-            
+
             # Add custom buttons
             log_button = message_box.addButton("View Log", QMessageBox.ActionRole)
-            
+
             if generated_files:
                 preview_button = message_box.addButton("Open in Preview", QMessageBox.ActionRole)
-            
+
             close_button = message_box.addButton("Close", QMessageBox.RejectRole)
             message_box.setDefaultButton(close_button)
-            
+
             reply = message_box.exec()
             clicked_button = message_box.clickedButton()
-            
+
             if clicked_button == log_button:
                 self.show_log_dialog(log_messages)
             elif generated_files and clicked_button == preview_button:
                 # Open the first successfully generated file in preview
                 video_path, funscript_path = generated_files[0]
                 self.load_video_and_funscript_in_preview(video_path, funscript_path)
-                
+
         else:
             message_box = QMessageBox(self)
             message_box.setWindowTitle("Run Finished")
             message_box.setText(f"Batch processing complete.\nCompleted in {time_str}")
             message_box.setStandardButtons(QMessageBox.NoButton)
-            
+
             # Add custom buttons
             log_button = message_box.addButton("View Log", QMessageBox.ActionRole)
-            
+
             if generated_files:
                 preview_button = message_box.addButton("Open in Preview", QMessageBox.ActionRole)
-            
+
             close_button = message_box.addButton("Close", QMessageBox.RejectRole)
             message_box.setDefaultButton(close_button)
-            
+
             reply = message_box.exec()
             clicked_button = message_box.clickedButton()
-            
+
             if clicked_button == log_button:
                 self.show_log_dialog(log_messages)
             elif generated_files and clicked_button == preview_button:
