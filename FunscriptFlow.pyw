@@ -2049,6 +2049,11 @@ if __name__ == '__main__':
     else:
         app = QApplication(sys.argv)
         
+        # Set application properties
+        app.setApplicationName("Funscript Flow")
+        app.setApplicationDisplayName("Funscript Flow")
+        app.setOrganizationName("Funscript Flow")
+        
         # Set application icon
         script_dir = os.path.dirname(os.path.abspath(__file__))
         icon_path = os.path.join(script_dir, "icon.png")
