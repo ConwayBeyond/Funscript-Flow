@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import gc
-import os, math, threading, concurrent.futures, json, argparse, time, sys, signal
+import os, math, threading, concurrent.futures, json, argparse, time, sys, signal, glob
 import numpy as np
 import cv2
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -9,8 +9,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QFileDialog, QMessageBox, QTextEdit, QDialog, QComboBox,
                                QFrame, QScrollArea, QTabWidget, QSlider, QGroupBox, QFormLayout,
                                QSizePolicy, QStyle)
-from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot, QUrl
-from PySide6.QtGui import QPixmap, QIcon, QFont, QPainter, QPen, QBrush, QColor
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot, QUrl, QMimeData
+from PySide6.QtGui import QPixmap, QIcon, QFont, QPainter, QPen, QBrush, QColor, QDragEnterEvent, QDropEvent
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 import matplotlib.pyplot as plt
@@ -1677,11 +1677,13 @@ class App(QMainWindow):
         
         # Funscript Generation Tab
         self.generation_tab = QWidget()
+        self.generation_tab.setAcceptDrops(True)
         self.tab_widget.addTab(self.generation_tab, "Funscript Generation")
         self.setup_generation_tab()
         
         # Script Preview Tab
         self.preview_tab = QWidget()
+        self.preview_tab.setAcceptDrops(True)
         self.tab_widget.addTab(self.preview_tab, "Script Preview")
         self.setup_preview_tab()
         
@@ -1779,6 +1781,7 @@ class App(QMainWindow):
         self.video_widget = QVideoWidget()
         self.video_widget.setMinimumHeight(300)
         self.video_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.video_widget.setAcceptDrops(False)  # Allow drag events to bubble up to parent
         layout.addWidget(self.video_widget, 1)  # Give it stretch factor of 1
         
         # Media player setup
@@ -1802,6 +1805,7 @@ class App(QMainWindow):
         self.position_slider.valueChanged.connect(self.on_slider_value_changed)
         self.position_slider.sliderPressed.connect(self.on_slider_pressed)
         self.position_slider.sliderReleased.connect(self.on_slider_released)
+        self.position_slider.setAcceptDrops(False)  # Allow drag events to bubble up to parent
         controls_layout.addWidget(self.position_slider)
         
         self.lbl_time = QLabel("00:00 / 00:00")
@@ -1818,6 +1822,7 @@ class App(QMainWindow):
         self.funscript_visualizer = FunScriptVisualizer()
         self.funscript_visualizer.positionChanged.connect(self.seek_to_position)
         self.funscript_visualizer.set_reference_slider(self.position_slider)
+        self.funscript_visualizer.setAcceptDrops(False)  # Allow drag events to bubble up to parent
         visualizer_layout.addWidget(self.funscript_visualizer)
         
         # Visualizer controls
@@ -2212,6 +2217,123 @@ class App(QMainWindow):
         layout.addWidget(close_btn)
         
         dialog.exec()
+    
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        """Handle drag enter events for both tabs."""
+        if event.mimeData().hasUrls():
+            # Check which tab is currently active
+            current_tab = self.tab_widget.currentWidget()
+            
+            if current_tab == self.generation_tab:
+                # Generation tab: accept videos and folders
+                accepted = False
+                for url in event.mimeData().urls():
+                    path = url.toLocalFile()
+                    if os.path.isdir(path):
+                        accepted = True
+                        break
+                    elif os.path.isfile(path):
+                        ext = os.path.splitext(path)[1].lower()
+                        if ext in SUPPORTED_VIDEO_EXTENSIONS:
+                            accepted = True
+                            break
+                
+                if accepted:
+                    event.acceptProposedAction()
+                else:
+                    event.ignore()
+                    
+            elif current_tab == self.preview_tab:
+                # Preview tab: accept videos and funscript files
+                accepted = False
+                for url in event.mimeData().urls():
+                    path = url.toLocalFile()
+                    if os.path.isfile(path):
+                        ext = os.path.splitext(path)[1].lower()
+                        if ext in SUPPORTED_VIDEO_EXTENSIONS or ext == ".funscript":
+                            accepted = True
+                            break
+                
+                if accepted:
+                    event.acceptProposedAction()
+                else:
+                    event.ignore()
+            else:
+                event.ignore()
+        else:
+            event.ignore()
+    
+    def dropEvent(self, event: QDropEvent):
+        """Handle drop events for both tabs."""
+        if event.mimeData().hasUrls():
+            current_tab = self.tab_widget.currentWidget()
+            
+            if current_tab == self.generation_tab:
+                # Generation tab: handle video files and folders
+                video_files = []
+                folders = []
+                
+                for url in event.mimeData().urls():
+                    path = url.toLocalFile()
+                    if os.path.isdir(path):
+                        folders.append(path)
+                    elif os.path.isfile(path):
+                        ext = os.path.splitext(path)[1].lower()
+                        if ext in SUPPORTED_VIDEO_EXTENSIONS:
+                            video_files.append(path)
+                
+                # Process dropped files/folders
+                if folders:
+                    # If folders were dropped, scan them for video files
+                    for folder in folders:
+                        for ext in SUPPORTED_VIDEO_EXTENSIONS:
+                            pattern = os.path.join(folder, f"*{ext}")
+                            video_files.extend(glob.glob(pattern))
+                
+                if video_files:
+                    self.files = video_files
+                    file_count = len(self.files)
+                    self.lbl_files.setText(f"{file_count} file(s) selected")
+                    
+                event.acceptProposedAction()
+                
+            elif current_tab == self.preview_tab:
+                # Preview tab: handle video and funscript files
+                video_file = None
+                funscript_file = None
+                
+                for url in event.mimeData().urls():
+                    path = url.toLocalFile()
+                    if os.path.isfile(path):
+                        ext = os.path.splitext(path)[1].lower()
+                        if ext in SUPPORTED_VIDEO_EXTENSIONS:
+                            video_file = path
+                        elif ext == ".funscript":
+                            funscript_file = path
+                
+                # Load video if dropped
+                if video_file:
+                    video_url = QUrl.fromLocalFile(video_file)
+                    self.media_player.setSource(video_url)
+                    self.current_video_path = video_file
+                
+                # Load funscript if dropped
+                if funscript_file:
+                    try:
+                        with open(funscript_file, 'r') as f:
+                            self.loaded_funscript_data = json.load(f)
+                        
+                        self.funscript_visualizer.load_funscript(self.loaded_funscript_data)
+                        
+                        # If we have a video duration, update the visualizer
+                        if self.media_player.duration() > 0:
+                            self.funscript_visualizer.set_duration(self.media_player.duration())
+                    except Exception as e:
+                        QMessageBox.warning(self, "Error", f"Failed to load funscript: {e}")
+                
+                event.acceptProposedAction()
+        else:
+            event.ignore()
 
 # ---------- Headless Mode ----------
 def run_headless(input_path, settings):
