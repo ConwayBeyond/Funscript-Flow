@@ -1862,6 +1862,11 @@ class App(QMainWindow):
         self.media_player.setAudioOutput(self.audio_output)
         self.media_player.setVideoOutput(self.video_widget)
         
+        # Initialize volume state
+        self.muted = False
+        self.previous_volume = 50
+        self.audio_output.setVolume(0.5)  # Set initial volume to 50%
+        
         # Video controls
         controls_layout = QHBoxLayout()
         
@@ -1882,6 +1887,23 @@ class App(QMainWindow):
         
         self.lbl_time = QLabel("00:00 / 00:00")
         controls_layout.addWidget(self.lbl_time)
+        
+        # Volume controls
+        volume_label = QLabel("Volume:")
+        controls_layout.addWidget(volume_label)
+        
+        self.volume_slider = QSlider(Qt.Horizontal)
+        self.volume_slider.setMinimum(0)
+        self.volume_slider.setMaximum(100)
+        self.volume_slider.setValue(50)  # Default to 50% volume
+        self.volume_slider.setFixedWidth(80)
+        self.volume_slider.valueChanged.connect(self.on_volume_changed)
+        controls_layout.addWidget(self.volume_slider)
+        
+        self.btn_mute = QPushButton("🔊")
+        self.btn_mute.setFixedWidth(30)
+        self.btn_mute.clicked.connect(self.toggle_mute)
+        controls_layout.addWidget(self.btn_mute)
         
         layout.addLayout(controls_layout)
         
@@ -2169,6 +2191,32 @@ class App(QMainWindow):
             self.btn_play_pause.setText("Pause")
         else:
             self.btn_play_pause.setText("Play")
+    
+    def on_volume_changed(self, volume):
+        """Handle volume slider changes."""
+        # Convert from 0-100 to 0.0-1.0 range
+        volume_float = volume / 100.0
+        self.audio_output.setVolume(volume_float)
+        
+        # Update mute button icon based on volume
+        if volume == 0:
+            self.btn_mute.setText("🔇")
+        elif volume < 50:
+            self.btn_mute.setText("🔉")
+        else:
+            self.btn_mute.setText("🔊")
+    
+    def toggle_mute(self):
+        """Toggle mute/unmute functionality."""
+        if hasattr(self, 'muted') and self.muted:
+            # Unmute: restore previous volume
+            self.volume_slider.setValue(getattr(self, 'previous_volume', 50))
+            self.muted = False
+        else:
+            # Mute: save current volume and set to 0
+            self.previous_volume = self.volume_slider.value()
+            self.volume_slider.setValue(0)
+            self.muted = True
             
     def update_visualizer_position(self):
         """Update the visualizer with current video position."""
