@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import gc
-import os, math, threading, concurrent.futures, json, argparse, time, sys
+import os, math, threading, concurrent.futures, json, argparse, time, sys, signal
 import numpy as np
 import cv2
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -2059,6 +2059,14 @@ if __name__ == '__main__':
         icon_path = os.path.join(script_dir, "icon.png")
         if os.path.exists(icon_path):
             app.setWindowIcon(QIcon(icon_path))
+        
+        # Install signal handler for graceful shutdown
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        
+        # Create timer to allow Python to process signals
+        timer = QTimer()
+        timer.timeout.connect(lambda: None)
+        timer.start(100)  # Process signals every 100ms
         
         window = App()
         window.show()
