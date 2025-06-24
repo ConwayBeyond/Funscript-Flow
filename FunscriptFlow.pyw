@@ -7,9 +7,12 @@ import cv2
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                                QPushButton, QLabel, QCheckBox, QProgressBar, QLineEdit, 
                                QFileDialog, QMessageBox, QTextEdit, QDialog, QComboBox,
-                               QFrame, QScrollArea, QTabWidget, QSlider, QGroupBox, QFormLayout)
-from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QPixmap, QIcon, QFont
+                               QFrame, QScrollArea, QTabWidget, QSlider, QGroupBox, QFormLayout,
+                               QSizePolicy, QStyle)
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot, QUrl
+from PySide6.QtGui import QPixmap, QIcon, QFont, QPainter, QPen, QBrush, QColor
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimediaWidgets import QVideoWidget
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -389,6 +392,276 @@ class ToolTip:
     """Simple tooltip for Qt widgets using setToolTip."""
     def __init__(self, widget, text="widget info"):
         widget.setToolTip(text)
+
+# ---------- FunScript Visualizer Widget ----------
+class FunScriptVisualizer(QWidget):
+    """Custom widget for visualizing FunScript data with pan and zoom functionality."""
+    
+    positionChanged = Signal(int)  # Emitted when user clicks to seek
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(120)
+        self.setMaximumHeight(150)
+        
+        # Data
+        self.actions = []
+        self.duration_ms = 0
+        self.current_position_ms = 0
+        
+        # View state
+        self.zoom_level = 1.0
+        self.pan_offset = 0.0
+        self.min_zoom = 1.0
+        self.max_zoom = 50.0
+        
+        # Interaction state
+        self.mouse_pressed = False
+        self.last_mouse_x = 0
+        self.dragging = False
+        
+        # Slider synchronization
+        self.reference_slider = None
+        self.slider_margins = 0
+        self.groove_width = 0
+        
+        # Visual settings
+        self.background_color = QColor(40, 40, 40)
+        self.grid_color = QColor(60, 60, 60)
+        self.line_color = QColor(100, 150, 255)
+        self.point_color = QColor(255, 255, 255)
+        self.current_pos_color = QColor(255, 100, 100)
+        
+        # Enable mouse tracking for hover effects
+        self.setMouseTracking(True)
+        
+    def load_funscript(self, funscript_data):
+        """Load FunScript data."""
+        self.actions = funscript_data.get("actions", [])
+        if self.actions:
+            self.duration_ms = max(action["at"] for action in self.actions)
+        else:
+            self.duration_ms = 0
+        self.reset_view()
+        self.update()
+        
+    def set_duration(self, duration_ms):
+        """Set the video duration."""
+        self.duration_ms = duration_ms
+        self.reset_view()
+        self.update()
+        
+    def set_position(self, position_ms):
+        """Set the current playback position."""
+        self.current_position_ms = position_ms
+        self.update()
+        
+    def set_reference_slider(self, slider):
+        """Set the reference slider for width synchronization."""
+        self.reference_slider = slider
+        self.update_slider_geometry()
+        
+    def update_slider_geometry(self):
+        """Update geometry to match the slider's groove area."""
+        if not self.reference_slider:
+            self.slider_margins = 10
+            return
+            
+        # Get the slider's groove rectangle
+        slider = self.reference_slider
+        style = slider.style()
+        
+        # Create style option for the slider
+        from PySide6.QtWidgets import QStyleOptionSlider
+        option = QStyleOptionSlider()
+        option.initFrom(slider)
+        option.minimum = slider.minimum()
+        option.maximum = slider.maximum()
+        option.sliderPosition = slider.value()
+        option.orientation = slider.orientation()
+        
+        # Get the groove rectangle
+        groove_rect = style.subControlRect(QStyle.CC_Slider, option, QStyle.SC_SliderGroove, slider)
+        
+        # Calculate margins from widget edge to groove
+        self.slider_margins = groove_rect.left()
+        self.groove_width = groove_rect.width()
+        
+    def reset_view(self):
+        """Reset pan and zoom to show full timeline."""
+        self.zoom_level = 1.0
+        self.pan_offset = 0.0
+        self.update()
+        
+    def time_to_x(self, time_ms):
+        """Convert time to x coordinate, matching slider groove area."""
+        if self.duration_ms == 0:
+            return 0
+        # Apply zoom and pan
+        normalized_time = time_ms / self.duration_ms
+        zoomed_time = (normalized_time - self.pan_offset) * self.zoom_level
+        
+        # Use actual groove dimensions
+        return self.slider_margins + (zoomed_time * self.groove_width)
+        
+    def x_to_time(self, x):
+        """Convert x coordinate to time, matching slider groove area."""
+        if self.duration_ms == 0:
+            return 0
+            
+        # Use actual groove dimensions
+        normalized_x = (x - self.slider_margins) / self.groove_width
+        time_normalized = (normalized_x / self.zoom_level) + self.pan_offset
+        return int(time_normalized * self.duration_ms)
+        
+    def position_to_y(self, position):
+        """Convert position value (0-100) to y coordinate."""
+        # Invert Y axis so 0 is at bottom, 100 at top
+        return self.height() - (position / 100.0) * self.height()
+        
+    def paintEvent(self, event):
+        """Paint the visualizer."""
+        # Update slider geometry on each paint to ensure sync
+        self.update_slider_geometry()
+        
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # Fill background
+        painter.fillRect(self.rect(), self.background_color)
+        
+        if not self.actions or self.duration_ms == 0:
+            painter.setPen(QPen(QColor(100, 100, 100)))
+            painter.drawText(self.rect(), Qt.AlignCenter, "No FunScript data loaded")
+            return
+            
+        # Draw grid lines
+        self.draw_grid(painter)
+        
+        # Draw FunScript line
+        self.draw_funscript_line(painter)
+        
+        # Draw current position indicator
+        self.draw_current_position(painter)
+        
+    def draw_grid(self, painter):
+        """Draw background grid."""
+        painter.setPen(QPen(self.grid_color, 1))
+        
+        # Horizontal lines (position levels)
+        for i in range(0, 101, 25):
+            y = self.position_to_y(i)
+            painter.drawLine(0, y, self.width(), y)
+            
+        # Vertical lines (time markers)
+        visible_duration = self.duration_ms / self.zoom_level
+        time_step = max(1000, visible_duration / 10)  # At least 1 second steps
+        
+        start_time = self.pan_offset * self.duration_ms
+        end_time = start_time + visible_duration
+        
+        current_time = (int(start_time / time_step) * time_step)
+        while current_time <= end_time:
+            x = self.time_to_x(current_time)
+            if 0 <= x <= self.width():
+                painter.drawLine(x, 0, x, self.height())
+            current_time += time_step
+            
+    def draw_funscript_line(self, painter):
+        """Draw the FunScript data as a connected line."""
+        if len(self.actions) < 2:
+            return
+            
+        # Filter actions that are visible in current view
+        visible_actions = []
+        for action in self.actions:
+            x = self.time_to_x(action["at"])
+            if -10 <= x <= self.width() + 10:  # Small margin for smooth edges
+                visible_actions.append(action)
+                
+        if len(visible_actions) < 2:
+            return
+            
+        # Draw lines between points
+        painter.setPen(QPen(self.line_color, 2))
+        for i in range(len(visible_actions) - 1):
+            action1 = visible_actions[i]
+            action2 = visible_actions[i + 1]
+            
+            x1 = self.time_to_x(action1["at"])
+            y1 = self.position_to_y(action1["pos"])
+            x2 = self.time_to_x(action2["at"])
+            y2 = self.position_to_y(action2["pos"])
+            
+            painter.drawLine(x1, y1, x2, y2)
+            
+        # Draw points
+        painter.setPen(QPen(self.point_color, 1))
+        painter.setBrush(QBrush(self.point_color))
+        for action in visible_actions:
+            x = self.time_to_x(action["at"])
+            y = self.position_to_y(action["pos"])
+            painter.drawEllipse(x - 2, y - 2, 4, 4)
+            
+    def draw_current_position(self, painter):
+        """Draw the current playback position indicator."""
+        x = self.time_to_x(self.current_position_ms)
+        if 0 <= x <= self.width():
+            painter.setPen(QPen(self.current_pos_color, 3))
+            painter.drawLine(x, 0, x, self.height())
+            
+    def mousePressEvent(self, event):
+        """Handle mouse press events."""
+        if event.button() == Qt.LeftButton:
+            self.mouse_pressed = True
+            self.last_mouse_x = event.x()
+            self.dragging = False
+            
+    def mouseMoveEvent(self, event):
+        """Handle mouse move events."""
+        if self.mouse_pressed:
+            dx = event.x() - self.last_mouse_x
+            if abs(dx) > 3:  # Start dragging only after significant movement
+                self.dragging = True
+                # Pan the view
+                pan_delta = -dx / self.width() / self.zoom_level
+                self.pan_offset = max(0, min(1 - 1/self.zoom_level, self.pan_offset + pan_delta))
+                self.update()
+            self.last_mouse_x = event.x()
+            
+    def mouseReleaseEvent(self, event):
+        """Handle mouse release events."""
+        if event.button() == Qt.LeftButton:
+            if self.mouse_pressed and not self.dragging:
+                # Single click - seek to position
+                time_ms = self.x_to_time(event.x())
+                time_ms = max(0, min(self.duration_ms, time_ms))
+                self.positionChanged.emit(time_ms)
+            self.mouse_pressed = False
+            self.dragging = False
+            
+    def wheelEvent(self, event):
+        """Handle mouse wheel events for zooming."""
+        # Get mouse position as a fraction of widget width
+        mouse_fraction = event.position().x() / self.width()
+        
+        # Calculate the time at mouse position before zoom
+        time_at_mouse = self.x_to_time(event.position().x())
+        
+        # Apply zoom
+        zoom_factor = 1.2 if event.angleDelta().y() > 0 else 1/1.2
+        new_zoom = self.zoom_level * zoom_factor
+        new_zoom = max(self.min_zoom, min(self.max_zoom, new_zoom))
+        
+        if new_zoom != self.zoom_level:
+            self.zoom_level = new_zoom
+            
+            # Adjust pan to keep the same time under the mouse
+            new_mouse_fraction = self.time_to_x(time_at_mouse) / self.width()
+            pan_adjustment = (mouse_fraction - new_mouse_fraction) / self.zoom_level
+            self.pan_offset = max(0, min(1 - 1/self.zoom_level, self.pan_offset + pan_adjustment))
+            
+            self.update()
 
 
 def detect_cut(pair, log_func=None, threshold=30):
@@ -1407,6 +1680,11 @@ class App(QMainWindow):
         self.tab_widget.addTab(self.generation_tab, "Funscript Generation")
         self.setup_generation_tab()
         
+        # Script Preview Tab
+        self.preview_tab = QWidget()
+        self.tab_widget.addTab(self.preview_tab, "Script Preview")
+        self.setup_preview_tab()
+        
         # Load configuration
         self.load_config()
         
@@ -1492,6 +1770,100 @@ class App(QMainWindow):
         layout.addLayout(button_layout)
         
         layout.addStretch()
+        
+    def setup_preview_tab(self):
+        """Setup the script preview tab."""
+        layout = QVBoxLayout(self.preview_tab)
+        
+        # Video player
+        self.video_widget = QVideoWidget()
+        self.video_widget.setMinimumHeight(300)
+        self.video_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout.addWidget(self.video_widget, 1)  # Give it stretch factor of 1
+        
+        # Media player setup
+        self.media_player = QMediaPlayer()
+        self.audio_output = QAudioOutput()
+        self.media_player.setAudioOutput(self.audio_output)
+        self.media_player.setVideoOutput(self.video_widget)
+        
+        # Video controls
+        controls_layout = QHBoxLayout()
+        
+        self.btn_play_pause = QPushButton("Play")
+        self.btn_play_pause.clicked.connect(self.toggle_play_pause)
+        self.btn_play_pause.setFixedWidth(60)  # Fixed width to prevent resizing
+        controls_layout.addWidget(self.btn_play_pause)
+        
+        self.position_slider = QSlider(Qt.Horizontal)
+        self.position_slider.setMinimum(0)
+        self.position_slider.setMaximum(1000)  # Higher resolution for smoother seeking
+        self.position_slider.sliderMoved.connect(self.set_position)
+        self.position_slider.valueChanged.connect(self.on_slider_value_changed)
+        self.position_slider.sliderPressed.connect(self.on_slider_pressed)
+        self.position_slider.sliderReleased.connect(self.on_slider_released)
+        controls_layout.addWidget(self.position_slider)
+        
+        self.lbl_time = QLabel("00:00 / 00:00")
+        controls_layout.addWidget(self.lbl_time)
+        
+        layout.addLayout(controls_layout)
+        
+        # FunScript visualizer
+        visualizer_group = QGroupBox("FunScript Visualizer")
+        visualizer_layout = QVBoxLayout(visualizer_group)
+        visualizer_layout.setContentsMargins(6, 6, 6, 6)  # Reduce margins
+        visualizer_layout.setSpacing(3)  # Reduce spacing between elements
+        
+        self.funscript_visualizer = FunScriptVisualizer()
+        self.funscript_visualizer.positionChanged.connect(self.seek_to_position)
+        self.funscript_visualizer.set_reference_slider(self.position_slider)
+        visualizer_layout.addWidget(self.funscript_visualizer)
+        
+        # Visualizer controls
+        viz_controls_layout = QHBoxLayout()
+        viz_controls_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins
+        
+        self.btn_reset_view = QPushButton("Reset View")
+        self.btn_reset_view.clicked.connect(self.funscript_visualizer.reset_view)
+        viz_controls_layout.addWidget(self.btn_reset_view)
+        
+        self.lbl_zoom = QLabel("Zoom: 1.0x")
+        viz_controls_layout.addWidget(self.lbl_zoom)
+        
+        viz_controls_layout.addStretch()
+        visualizer_layout.addLayout(viz_controls_layout)
+        
+        layout.addWidget(visualizer_group)
+        
+        # File loading buttons at bottom right
+        bottom_layout = QHBoxLayout()
+        bottom_layout.addStretch()  # Push buttons to the right
+        
+        self.btn_load_video = QPushButton("Load Video")
+        self.btn_load_video.clicked.connect(self.load_video)
+        bottom_layout.addWidget(self.btn_load_video)
+        
+        self.btn_load_funscript = QPushButton("Load FunScript")
+        self.btn_load_funscript.clicked.connect(self.load_funscript)
+        bottom_layout.addWidget(self.btn_load_funscript)
+        
+        layout.addLayout(bottom_layout)
+        
+        # Initialize media player connections
+        self.media_player.positionChanged.connect(self.on_position_changed)
+        self.media_player.durationChanged.connect(self.on_duration_changed)
+        self.media_player.playbackStateChanged.connect(self.on_playback_state_changed)
+        
+        # Timer for updating visualizer position
+        self.position_timer = QTimer()
+        self.position_timer.timeout.connect(self.update_visualizer_position)
+        self.position_timer.start(50)  # Update every 50ms for smooth visualization
+        
+        # State variables
+        self.loaded_video_path = None
+        self.loaded_funscript_data = None
+        self.slider_being_dragged = False
         
     def setup_advanced_settings(self):
         """Setup advanced settings form."""
@@ -1598,6 +1970,115 @@ class App(QMainWindow):
         
         dialog.show()
     
+    def load_video(self):
+        """Load a video file for preview."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Load Video", "",
+            "Video Files (*.mp4 *.avi *.mov *.mkv *.m4v *.webm *.wmv *.flv *.mpg *.mpeg *.ts);;All Files (*)"
+        )
+        if file_path:
+            self.loaded_video_path = file_path
+            self.media_player.setSource(QUrl.fromLocalFile(file_path))
+            
+    def load_funscript(self):
+        """Load a FunScript file for visualization."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Load FunScript", "",
+            "FunScript Files (*.funscript);;JSON Files (*.json);;All Files (*)"
+        )
+        if file_path:
+            try:
+                with open(file_path, 'r') as f:
+                    self.loaded_funscript_data = json.load(f)
+                
+                self.funscript_visualizer.load_funscript(self.loaded_funscript_data)
+                
+                # If we have a video duration, update the visualizer
+                if self.media_player.duration() > 0:
+                    self.funscript_visualizer.set_duration(self.media_player.duration())
+                    
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to load FunScript: {e}")
+                
+    def toggle_play_pause(self):
+        """Toggle between play and pause states."""
+        if self.media_player.playbackState() == QMediaPlayer.PlayingState:
+            self.media_player.pause()
+        else:
+            self.media_player.play()
+            
+    def on_slider_pressed(self):
+        """Handle when user starts interacting with the slider."""
+        self.slider_being_dragged = True
+        # Immediately seek to the clicked position for instant feedback
+        self.set_position(self.position_slider.value())
+        
+    def on_slider_released(self):
+        """Handle when user releases the slider."""
+        self.slider_being_dragged = False
+        
+    def on_slider_value_changed(self, position):
+        """Handle slider value changes from user interaction."""
+        # Only respond to user-initiated changes when user is interacting with slider
+        if self.slider_being_dragged:
+            self.set_position(position)
+        
+    def set_position(self, position):
+        """Set the video position from slider."""
+        duration = self.media_player.duration()
+        if duration > 0:
+            new_position = (position * duration) // 1000
+            self.media_player.setPosition(new_position)
+            
+    def seek_to_position(self, position_ms):
+        """Seek to a specific position from the visualizer."""
+        self.media_player.setPosition(position_ms)
+        
+    def on_position_changed(self, position):
+        """Handle video position changes."""
+        duration = self.media_player.duration()
+        if duration > 0:
+            # Only update slider if user is not dragging it
+            if not self.slider_being_dragged:
+                slider_position = (position * 1000) // duration
+                # Block signals temporarily to prevent feedback loop
+                self.position_slider.blockSignals(True)
+                self.position_slider.setValue(slider_position)
+                self.position_slider.blockSignals(False)
+            
+            # Always update time label
+            current_time = self.format_time(position)
+            total_time = self.format_time(duration)
+            self.lbl_time.setText(f"{current_time} / {total_time}")
+            
+    def on_duration_changed(self, duration):
+        """Handle video duration changes."""
+        if duration > 0 and self.loaded_funscript_data:
+            self.funscript_visualizer.set_duration(duration)
+            
+    def on_playback_state_changed(self, state):
+        """Handle playback state changes."""
+        if state == QMediaPlayer.PlayingState:
+            self.btn_play_pause.setText("Pause")
+        else:
+            self.btn_play_pause.setText("Play")
+            
+    def update_visualizer_position(self):
+        """Update the visualizer with current video position."""
+        if self.media_player.duration() > 0:
+            current_position = self.media_player.position()
+            self.funscript_visualizer.set_position(current_position)
+            
+            # Update zoom label
+            zoom_level = self.funscript_visualizer.zoom_level
+            self.lbl_zoom.setText(f"Zoom: {zoom_level:.1f}x")
+            
+    def format_time(self, ms):
+        """Format time in milliseconds to MM:SS format."""
+        seconds = ms // 1000
+        minutes = seconds // 60
+        seconds = seconds % 60
+        return f"{minutes:02d}:{seconds:02d}"
     
     def save_config(self):
         """Save configuration to file."""
