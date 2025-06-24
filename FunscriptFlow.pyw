@@ -8,10 +8,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QPushButton, QLabel, QCheckBox, QProgressBar, QLineEdit, 
                                QFileDialog, QMessageBox, QTextEdit, QDialog, QComboBox,
                                QFrame, QScrollArea, QTabWidget, QSlider, QGroupBox, QFormLayout)
-from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QPixmap, QIcon, QFont
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-from PySide6.QtMultimediaWidgets import QVideoWidget
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -392,245 +390,6 @@ class ToolTip:
     def __init__(self, widget, text="widget info"):
         widget.setToolTip(text)
 
-class FunscriptVisualizerWidget(QWidget):
-    """Widget for visualizing funscript data in real-time."""
-    def __init__(self):
-        super().__init__()
-        self.layout = QVBoxLayout(self)
-        
-        # Create matplotlib figure and canvas
-        self.figure = Figure(figsize=(12, 4), dpi=100)
-        self.canvas = FigureCanvas(self.figure)
-        self.layout.addWidget(self.canvas)
-        
-        # Create the plot
-        self.ax = self.figure.add_subplot(111)
-        self.ax.set_xlim(0, 100)  # Will be updated with actual data
-        self.ax.set_ylim(0, 100)
-        self.ax.set_xlabel('Time (seconds)')
-        self.ax.set_ylabel('Position (0-100)')
-        self.ax.set_title('Funscript Visualization')
-        self.ax.grid(True, alpha=0.3)
-        
-        # Data storage
-        self.funscript_data = None
-        self.current_time = 0
-        self.line = None
-        self.current_marker = None
-        
-    def load_funscript(self, funscript_path):
-        """Load funscript data from file."""
-        try:
-            with open(funscript_path, 'r') as f:
-                data = json.load(f)
-            
-            self.funscript_data = data['actions']
-            
-            # Extract time and position data
-            times = [action['at'] / 1000.0 for action in self.funscript_data]  # Convert ms to seconds
-            positions = [action['pos'] for action in self.funscript_data]
-            
-            # Update plot
-            self.ax.clear()
-            self.ax.set_xlabel('Time (seconds)')
-            self.ax.set_ylabel('Position (0-100)')
-            self.ax.set_title('Funscript Visualization')
-            self.ax.grid(True, alpha=0.3)
-            
-            if times:
-                self.ax.set_xlim(0, max(times))
-                self.line, = self.ax.plot(times, positions, 'b-', linewidth=2, alpha=0.7)
-                self.current_marker, = self.ax.plot([], [], 'ro', markersize=8)
-            
-            self.canvas.draw()
-            
-        except Exception as e:
-            print(f"Error loading funscript: {e}")
-    
-    def update_current_time(self, time_seconds):
-        """Update the current time marker on the plot."""
-        self.current_time = time_seconds
-        
-        if self.current_marker is not None and self.funscript_data:
-            # Find the closest action point for interpolation
-            closest_pos = 50  # Default position
-            
-            # Linear interpolation between adjacent points
-            for i in range(len(self.funscript_data) - 1):
-                t1 = self.funscript_data[i]['at'] / 1000.0
-                t2 = self.funscript_data[i + 1]['at'] / 1000.0
-                
-                if t1 <= time_seconds <= t2:
-                    p1 = self.funscript_data[i]['pos']
-                    p2 = self.funscript_data[i + 1]['pos']
-                    # Linear interpolation
-                    ratio = (time_seconds - t1) / (t2 - t1) if t2 != t1 else 0
-                    closest_pos = p1 + ratio * (p2 - p1)
-                    break
-            
-            self.current_marker.set_data([time_seconds], [closest_pos])
-            self.canvas.draw_idle()
-
-class VideoPlayerWidget(QWidget):
-    """Video player widget with funscript synchronization."""
-    timeChanged = Signal(float)  # Emits current time in seconds
-    
-    def __init__(self):
-        super().__init__()
-        self.layout = QVBoxLayout(self)
-        
-        # Video widget
-        self.video_widget = QVideoWidget()
-        self.layout.addWidget(self.video_widget)
-        
-        # Media player
-        self.media_player = QMediaPlayer()
-        self.audio_output = QAudioOutput()
-        self.media_player.setAudioOutput(self.audio_output)
-        self.media_player.setVideoOutput(self.video_widget)
-        
-        # Controls
-        self.controls_layout = QHBoxLayout()
-        
-        self.play_button = QPushButton("Play")
-        self.play_button.clicked.connect(self.toggle_play)
-        self.controls_layout.addWidget(self.play_button)
-        
-        self.position_slider = QSlider(Qt.Horizontal)
-        self.position_slider.sliderMoved.connect(self.set_position)
-        self.controls_layout.addWidget(self.position_slider)
-        
-        self.time_label = QLabel("00:00 / 00:00")
-        self.controls_layout.addWidget(self.time_label)
-        
-        self.layout.addLayout(self.controls_layout)
-        
-        # Connect signals
-        self.media_player.durationChanged.connect(self.duration_changed)
-        self.media_player.positionChanged.connect(self.position_changed)
-        self.media_player.playbackStateChanged.connect(self.state_changed)
-        
-    def load_video(self, video_path):
-        """Load a video file."""
-        self.media_player.setSource(QUrl.fromLocalFile(video_path))
-        
-    def toggle_play(self):
-        """Toggle play/pause."""
-        if self.media_player.playbackState() == QMediaPlayer.PlayingState:
-            self.media_player.pause()
-        else:
-            self.media_player.play()
-    
-    def set_position(self, position):
-        """Set playback position."""
-        self.media_player.setPosition(position)
-    
-    def duration_changed(self, duration):
-        """Update slider maximum when duration changes."""
-        self.position_slider.setMaximum(duration)
-        
-    def position_changed(self, position):
-        """Update UI when position changes."""
-        self.position_slider.setValue(position)
-        
-        # Update time label
-        current_time = self.format_time(position)
-        total_time = self.format_time(self.media_player.duration())
-        self.time_label.setText(f"{current_time} / {total_time}")
-        
-        # Emit time changed signal for synchronization
-        self.timeChanged.emit(position / 1000.0)  # Convert ms to seconds
-        
-    def state_changed(self, state):
-        """Update play button text when state changes."""
-        if state == QMediaPlayer.PlayingState:
-            self.play_button.setText("Pause")
-        else:
-            self.play_button.setText("Play")
-    
-    def format_time(self, milliseconds):
-        """Format time in mm:ss format."""
-        seconds = milliseconds // 1000
-        minutes = seconds // 60
-        seconds = seconds % 60
-        return f"{minutes:02d}:{seconds:02d}"
-
-class VideoPlayerDialog(QDialog):
-    """Dialog for video playback with funscript visualization."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Video Player with Funscript Visualization")
-        self.setModal(False)
-        self.resize(1200, 800)
-        
-        # Application icon is inherited from QApplication
-        
-        layout = QVBoxLayout(self)
-        
-        # Create splitter for video and visualization
-        splitter_widget = QWidget()
-        splitter_layout = QHBoxLayout(splitter_widget)
-        
-        # Video section
-        video_section = QWidget()
-        video_layout = QVBoxLayout(video_section)
-        video_layout.addWidget(QLabel("Video Player"))
-        
-        self.video_player = VideoPlayerWidget()
-        video_layout.addWidget(self.video_player)
-        
-        # Visualization section
-        viz_section = QWidget()
-        viz_layout = QVBoxLayout(viz_section)
-        viz_layout.addWidget(QLabel("Funscript Visualization"))
-        
-        self.funscript_visualizer = FunscriptVisualizerWidget()
-        viz_layout.addWidget(self.funscript_visualizer)
-        
-        # Add sections to splitter
-        splitter_layout.addWidget(video_section, 1)  # Video takes more space
-        splitter_layout.addWidget(viz_section, 1)
-        
-        layout.addWidget(splitter_widget)
-        
-        # Connect video time changes to visualization updates
-        self.video_player.timeChanged.connect(self.funscript_visualizer.update_current_time)
-        
-        # File loading controls
-        controls_layout = QHBoxLayout()
-        
-        load_video_btn = QPushButton("Load Video")
-        load_video_btn.clicked.connect(self.load_video)
-        controls_layout.addWidget(load_video_btn)
-        
-        load_funscript_btn = QPushButton("Load Funscript")
-        load_funscript_btn.clicked.connect(self.load_funscript)
-        controls_layout.addWidget(load_funscript_btn)
-        
-        layout.addLayout(controls_layout)
-        
-    def load_video(self):
-        """Load a video file."""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Open Video File", "", 
-            "Video Files (*.mp4 *.avi *.mov *.mkv *.m4v *.webm *.wmv *.flv *.mpg *.mpeg *.ts);;All Files (*)"
-        )
-        if file_path:
-            self.video_player.load_video(file_path)
-    
-    def load_funscript(self):
-        """Load a funscript file."""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Open Funscript File", "", 
-            "Funscript Files (*.funscript);;JSON Files (*.json);;All Files (*)"
-        )
-        if file_path:
-            self.funscript_visualizer.load_funscript(file_path)
-    
-    def load_video_and_funscript(self, video_path, funscript_path):
-        """Load both video and funscript files."""
-        self.video_player.load_video(video_path)
-        self.funscript_visualizer.load_funscript(funscript_path)
 
 def detect_cut(pair, log_func=None, threshold=30):
     return False
@@ -1648,10 +1407,6 @@ class App(QMainWindow):
         self.tab_widget.addTab(self.generation_tab, "Funscript Generation")
         self.setup_generation_tab()
         
-        # Video Player Tab
-        self.player_tab = VideoPlayerDialog()
-        self.tab_widget.addTab(self.player_tab, "Video Player & Visualizer")
-        
         # Load configuration
         self.load_config()
         
@@ -1732,10 +1487,6 @@ class App(QMainWindow):
         self.btn_cancel.setEnabled(False)
         button_layout.addWidget(self.btn_cancel)
         
-        # Add Preview Generated Funscript button
-        self.btn_preview = QPushButton("Preview Generated Funscript")
-        self.btn_preview.clicked.connect(self.preview_funscript)
-        button_layout.addWidget(self.btn_preview)
         
         button_layout.addStretch()
         layout.addLayout(button_layout)
@@ -1847,9 +1598,6 @@ class App(QMainWindow):
         
         dialog.show()
     
-    def preview_funscript(self):
-        """Open the video player tab to preview generated funscripts."""
-        self.tab_widget.setCurrentIndex(1)  # Switch to video player tab
     
     def save_config(self):
         """Save configuration to file."""
