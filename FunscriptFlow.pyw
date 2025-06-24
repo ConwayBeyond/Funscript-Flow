@@ -1820,6 +1820,30 @@ class App(QMainWindow):
         
         layout.addWidget(progress_group)
         
+        # Live Log section (collapsible)
+        self.log_group = QGroupBox(STRINGS["live_log"])
+        self.log_group.setCheckable(True)
+        self.log_group.setChecked(True)  # Expanded by default
+        log_layout = QVBoxLayout(self.log_group)
+        
+        # Log display text area
+        self.log_display = QTextEdit()
+        self.log_display.setReadOnly(True)
+        self.log_display.setMaximumHeight(200)
+        self.log_display.setMinimumHeight(150)
+        self.log_display.setStyleSheet("QTextEdit { font-family: monospace; font-size: 10pt; }")
+        log_layout.addWidget(self.log_display)
+        
+        # Clear log button
+        log_button_layout = QHBoxLayout()
+        self.btn_clear_log = QPushButton(STRINGS["clear_log"])
+        self.btn_clear_log.clicked.connect(self.clear_log_display)
+        log_button_layout.addWidget(self.btn_clear_log)
+        log_button_layout.addStretch()
+        log_layout.addLayout(log_button_layout)
+        
+        layout.addWidget(self.log_group)
+        
         # Advanced settings section (collapsible)
         self.adv_group = QGroupBox(STRINGS["advanced_settings"])
         self.adv_group.setCheckable(True)
@@ -2288,6 +2312,17 @@ class App(QMainWindow):
         if "backend" in config and config["backend"] in self.available_backends:
             self.backend_combo.setCurrentText(config["backend"])
     
+    def clear_log_display(self):
+        """Clear the log display."""
+        self.log_display.clear()
+    
+    def append_log_message(self, message):
+        """Append a log message to the display and auto-scroll."""
+        self.log_display.append(message)
+        # Auto-scroll to the bottom
+        scrollbar = self.log_display.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+    
     def run_batch(self):
         """Start batch processing."""
         if not self.files:
@@ -2310,9 +2345,10 @@ class App(QMainWindow):
             QMessageBox.critical(self, "Parameter Error", f"Invalid parameters: {e}")
             return
         
-        # Reset progress
+        # Reset progress and clear log
         self.overall_progress.setValue(0)
         self.video_progress.setValue(0)
+        self.clear_log_display()
         
         # Disable controls
         self.btn_run.setEnabled(False)
@@ -2322,6 +2358,7 @@ class App(QMainWindow):
         self.worker_thread = WorkerThread(self.files, settings)
         self.worker_thread.progressChanged.connect(self.overall_progress.setValue)
         self.worker_thread.videoProgressChanged.connect(self.video_progress.setValue)
+        self.worker_thread.logMessage.connect(self.append_log_message)
         self.worker_thread.finished.connect(self.on_batch_finished)
         self.worker_thread.start()
     
