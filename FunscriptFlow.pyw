@@ -1650,6 +1650,52 @@ class WorkerThread(QThread):
             
         self.finished.emit(error_occurred, time_str, self.log_messages)
 
+class MotionIndicatorWindow(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Motion Indicator")
+        self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.resize(50, 300)
+        
+        # Make window resizable
+        self.setMinimumSize(20, 50)
+        
+        # Current position value (0-100)
+        self.current_position = 0
+        
+        # Set up the widget
+        self.setStyleSheet("background-color: black;")
+        
+    def set_position(self, position):
+        """Set the position of the motion indicator (0-100)"""
+        self.current_position = max(0, min(100, position))
+        self.update()
+        
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # Fill background
+        painter.fillRect(self.rect(), QColor(0, 0, 0))
+        
+        # Draw the vertical bar
+        width = self.width()
+        height = self.height()
+        
+        # Calculate bar height based on position (0-100)
+        bar_height = int((self.current_position / 100.0) * height)
+        
+        # Draw from bottom up
+        bar_rect = self.rect()
+        bar_rect.setTop(height - bar_height)
+        
+        # Use red color for the bar
+        painter.fillRect(bar_rect, QColor(255, 0, 0))
+        
+        # Draw border
+        painter.setPen(QPen(QColor(128, 128, 128), 1))
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+
 class App(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1670,6 +1716,10 @@ class App(QMainWindow):
         self.params = {}
         self.backends = get_available_backends()
         self.available_backends = []
+        
+        # Initialize motion indicator window
+        self.motion_indicator = MotionIndicatorWindow(self)
+        self.motion_indicator_visible = False
         
         # Create tab widget
         self.tab_widget = QTabWidget()
@@ -1832,6 +1882,10 @@ class App(QMainWindow):
         self.btn_reset_view = QPushButton("Reset View")
         self.btn_reset_view.clicked.connect(self.funscript_visualizer.reset_view)
         viz_controls_layout.addWidget(self.btn_reset_view)
+        
+        self.btn_toggle_indicator = QPushButton("Show Indicator")
+        self.btn_toggle_indicator.clicked.connect(self.toggle_motion_indicator)
+        viz_controls_layout.addWidget(self.btn_toggle_indicator)
         
         self.lbl_zoom = QLabel("Zoom: 1.0x")
         viz_controls_layout.addWidget(self.lbl_zoom)
@@ -2077,6 +2131,11 @@ class App(QMainWindow):
             # Update zoom label
             zoom_level = self.funscript_visualizer.zoom_level
             self.lbl_zoom.setText(f"Zoom: {zoom_level:.1f}x")
+            
+            # Update motion indicator if visible
+            if self.motion_indicator_visible:
+                current_value = self.get_current_funscript_value()
+                self.motion_indicator.set_position(current_value)
             
     def format_time(self, ms):
         """Format time in milliseconds to MM:SS format."""
@@ -2334,6 +2393,48 @@ class App(QMainWindow):
                 event.acceptProposedAction()
         else:
             event.ignore()
+    
+    def get_current_funscript_value(self):
+        """Get the current funscript position value at current playback time."""
+        if not hasattr(self, 'loaded_funscript_data') or not self.loaded_funscript_data or not self.funscript_visualizer.actions:
+            return 0
+        
+        current_time = self.media_player.position()
+        actions = self.funscript_visualizer.actions
+        
+        if not actions:
+            return 0
+        
+        # Find surrounding actions for interpolation
+        for i in range(len(actions) - 1):
+            if actions[i]["at"] <= current_time <= actions[i + 1]["at"]:
+                # Interpolate between the two points
+                t1, pos1 = actions[i]["at"], actions[i]["pos"]
+                t2, pos2 = actions[i + 1]["at"], actions[i + 1]["pos"]
+                
+                if t2 == t1:
+                    return pos1
+                
+                # Linear interpolation
+                ratio = (current_time - t1) / (t2 - t1)
+                return pos1 + (pos2 - pos1) * ratio
+        
+        # If before first action or after last action
+        if current_time < actions[0]["at"]:
+            return actions[0]["pos"]
+        else:
+            return actions[-1]["pos"]
+    
+    def toggle_motion_indicator(self):
+        """Toggle the visibility of the motion indicator window"""
+        if self.motion_indicator_visible:
+            self.motion_indicator.hide()
+            self.motion_indicator_visible = False
+            self.btn_toggle_indicator.setText("Show Indicator")
+        else:
+            self.motion_indicator.show()
+            self.motion_indicator_visible = True
+            self.btn_toggle_indicator.setText("Hide Indicator")
 
 # ---------- Headless Mode ----------
 def run_headless(input_path, settings):
