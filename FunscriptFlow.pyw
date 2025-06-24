@@ -392,18 +392,26 @@ class ToolTip:
     def leave(self, event=None):
         self.hidetip()
     def showtip(self):
-        if self.tipwindow or not self.text:
+        if self.tipwindow:
             return
-        x, y, cx, cy = self.widget.bbox("insert")
-        x = x + self.widget.winfo_rootx() + 25
-        y = y + cy + self.widget.winfo_rooty() + 25
+        if not self.text or not self.text.strip():
+            return
+        try:
+            x, y, cx, cy = self.widget.bbox("insert")
+            x = x + self.widget.winfo_rootx() + 25
+            y = y + cy + self.widget.winfo_rooty() + 25
+        except:
+            x = self.widget.winfo_rootx() + 25
+            y = self.widget.winfo_rooty() + 25
         self.tipwindow = tw = tk.Toplevel(self.widget)
         tw.wm_overrideredirect(True)
         tw.wm_geometry("+%d+%d" % (x, y))
         label = tk.Label(tw, text=self.text, justify=tk.LEFT,
-                         background="#ffffe0", relief=tk.SOLID, borderwidth=1,
-                         font=("tahoma", "8", "normal"))
-        label.pack(ipadx=1)
+                         background="#ffffe0", foreground="#000000", relief=tk.SOLID, borderwidth=1,
+                         font=("Helvetica", "10", "normal"), wraplength=300)
+        label.pack(ipadx=5, ipady=3)
+        tw.update_idletasks()
+        tw.lift()
     def hidetip(self):
         if self.tipwindow:
             self.tipwindow.destroy()
