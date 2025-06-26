@@ -1,11 +1,13 @@
 # Detect OS - Windows first since uname won't exist there
 ifeq ($(OS),Windows_NT)
     PLATFORM := Windows
-    BUILD_CMD := uv run nuitka FunscriptFlow.pyw \
-		--standalone \
+    BUILD_CMD := uv run python -m nuitka --standalone \
+		src/main.py \
+		--include-package=src \
 		--enable-plugin=pyside6 \
 		--windows-disable-console \
 		--windows-icon-from-ico=icon.ico \
+		--output-filename=FunscriptFlow.exe \
 		--output-dir=dist
     BUILD_MSG := Building Windows executable...
     BUILD_SUCCESS := Build complete! Executable created in dist/
@@ -13,20 +15,24 @@ else
     UNAME_S := $(shell uname -s)
     ifeq ($(UNAME_S),Darwin)
         PLATFORM := macOS
-        BUILD_CMD := uv run nuitka FunscriptFlow.pyw \
-			--standalone \
+        BUILD_CMD := uv run python -m nuitka --standalone \
+			src/main.py \
+			--include-package=src \
 			--enable-plugin=pyside6 \
 			--macos-create-app-bundle \
 			--macos-app-icon=icon.png \
+			--macos-app-name="Funscript Flow" \
 			--output-dir=dist
         BUILD_MSG := Building macOS app bundle...
         BUILD_SUCCESS := Build complete! App bundle created in dist/
     else ifeq ($(UNAME_S),Linux)
         PLATFORM := Linux
-        BUILD_CMD := uv run nuitka FunscriptFlow.pyw \
-			--standalone \
+        BUILD_CMD := uv run python -m nuitka --standalone \
+			src/main.py \
+			--include-package=src \
 			--enable-plugin=pyside6 \
 			--linux-icon=icon.png \
+			--output-filename=FunscriptFlow \
 			--output-dir=dist
         BUILD_MSG := Building Linux executable...
         BUILD_SUCCESS := Build complete! Executable created in dist/
@@ -57,7 +63,7 @@ install:
 # Run application in development mode
 run:
 	@echo "Running Funscript Flow..."
-	uv run FunscriptFlow.pyw
+	uv run python -m src.main
 
 # Build for current platform
 build: install
@@ -70,6 +76,9 @@ clean:
 	@echo "Cleaning build artifacts..."
 	rm -rf dist/
 	rm -rf build/
+	rm -rf main.build/
+	rm -rf main.dist/
+	rm -rf main.onefile-build/
 	rm -rf FunscriptFlow.build/
 	rm -rf FunscriptFlow.dist/
 	rm -rf FunscriptFlow.onefile-build/
