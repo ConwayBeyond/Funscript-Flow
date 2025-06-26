@@ -1831,7 +1831,6 @@ class App(QMainWindow):
         self.log_display.setReadOnly(True)
         self.log_display.setMaximumHeight(200)
         self.log_display.setMinimumHeight(150)
-        self.log_display.setStyleSheet("QTextEdit { font-family: monospace; font-size: 10pt; }")
         log_layout.addWidget(self.log_display)
         
         # Clear log button
