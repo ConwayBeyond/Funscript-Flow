@@ -22,7 +22,7 @@ else
 			--macos-create-app-bundle \
 			--macos-app-icon=src/assets/icon.png \
 			--macos-app-name="Funscript Flow" \
-			--macos-bundle-identifier="com.funscriptflow.app" \
+			--macos-signed-app-name="com.funscriptflow.app" \
 			--output-filename=FunscriptFlow \
 			--output-dir=dist
         BUILD_MSG := Building macOS app bundle...
