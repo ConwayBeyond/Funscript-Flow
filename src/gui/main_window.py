@@ -189,37 +189,65 @@ class App(QMainWindow):
         """Setup advanced settings section."""
         advanced_layout = QFormLayout(self.adv_group)
         
-        # Get available backends
-        backend_choices = []
-        for backend, available in self.backends.items():
-            if available:
-                backend_choices.append(backend)
-        
-        # Backend selection
+        # Backend selection - exact match to old implementation
         self.combo_backend = QComboBox()
-        self.combo_backend.addItems(backend_choices)
+        
+        # Format backend options to show availability (exact old logic)
+        backend_display = []
+        self.available_backends = []
+        for i, (backend, available) in enumerate([("CPU", True), ("CUDA", self.backends["CUDA"]), 
+                                                  ("OpenCL", self.backends["OpenCL"]), ("DNN", self.backends["DNN"])]):
+            if available:
+                backend_display.append(backend)
+                self.available_backends.append(backend)
+            else:
+                backend_display.append(f"{backend} (unavailable)")
+        
+        self.combo_backend.addItems(backend_display)
+        
+        # Disable unavailable backend items
+        for i, (backend, available) in enumerate([("CPU", True), ("CUDA", self.backends["CUDA"]), 
+                                                  ("OpenCL", self.backends["OpenCL"]), ("DNN", self.backends["DNN"])]):
+            if not available:
+                # Get the model and disable the item
+                model = self.combo_backend.model()
+                item = model.item(i)
+                if item:
+                    item.setEnabled(False)
+        
         self.combo_backend.setCurrentText("CPU")
-        advanced_layout.addRow(QLabel("Backend:"), self.combo_backend)
+        self.combo_backend.setToolTip("Select processing backend. GPU acceleration can significantly speed up processing. Unavailable options require specific hardware or OpenCV build configuration.")
+        advanced_layout.addRow(QLabel("Processing Backend:"), self.combo_backend)
         
         # Number of threads
-        self.line_threads = QLineEdit("8")
+        self.line_threads = QLineEdit(str(os.cpu_count() or 1))
+        self.line_threads.setToolTip("Number of threads used for optical flow computation.")
         advanced_layout.addRow(QLabel("Threads:"), self.line_threads)
         
         # Detrend window
-        self.line_detrend = QLineEdit("120")
+        self.line_detrend = QLineEdit("1.5")
+        self.line_detrend.setToolTip("Controls the aggressiveness of drift removal. See readme for detail. Recommended: 1-10, higher values for more stable cameras.")
         advanced_layout.addRow(QLabel("Detrend Window:"), self.line_detrend)
         
         # Norm window
-        self.line_norm = QLineEdit("120")
+        self.line_norm = QLineEdit("4")
+        self.line_norm.setToolTip("Time window to calibrate motion range (seconds). Shorter values amplify motion, but also cause artifacts in long thrusts.")
         advanced_layout.addRow(QLabel("Norm Window:"), self.line_norm)
         
         # Batch size
-        self.line_batch = QLineEdit("50")
+        self.line_batch = QLineEdit("3000")
+        self.line_batch.setToolTip("Number of frames to process per batch (Higher values will be faster, but also take more RAM).")
         advanced_layout.addRow(QLabel("Batch Size:"), self.line_batch)
+        
+        # Cut threshold
+        self.line_cut_threshold = QLineEdit("7")
+        self.line_cut_threshold.setToolTip("Threshold for detecting scene cuts in optical flow. Higher values reduce sensitivity to scene changes.")
+        advanced_layout.addRow(QLabel("Cut Threshold:"), self.line_cut_threshold)
         
         # Additional options
         self.chk_keyframe = QCheckBox("Keyframe Reduction")
         self.chk_keyframe.setChecked(True)
+        self.chk_keyframe.setToolTip("Enable keyframe reduction optimization to improve processing speed.")
         advanced_layout.addRow(self.chk_keyframe)
         
         self.chk_overwrite = QCheckBox(STRINGS["overwrite_files"])
@@ -356,8 +384,14 @@ class App(QMainWindow):
                 self.chk_pov.setChecked(config["pov_mode"])
             if "keyframe_reduction" in config:
                 self.chk_keyframe.setChecked(config["keyframe_reduction"])
-            if "backend" in config and config["backend"] in [self.combo_backend.itemText(i) for i in range(self.combo_backend.count())]:
-                self.combo_backend.setCurrentText(config["backend"])
+            if "backend" in config:
+                # Find matching backend (available or unavailable)
+                backend_name = config["backend"]
+                for i in range(self.combo_backend.count()):
+                    item_text = self.combo_backend.itemText(i)
+                    if item_text == backend_name or item_text == f"{backend_name} (unavailable)":
+                        self.combo_backend.setCurrentText(item_text)
+                        break
             if "threads" in config:
                 self.line_threads.setText(str(config["threads"]))
             if "detrend_window" in config:
@@ -366,26 +400,38 @@ class App(QMainWindow):
                 self.line_norm.setText(str(config["norm_window"]))
             if "batch_size" in config:
                 self.line_batch.setText(str(config["batch_size"]))
+            if "cut_threshold" in config:
+                self.line_cut_threshold.setText(str(config["cut_threshold"]))
         except Exception as e:
-            print(f"Could not load config: {e}")
+            QMessageBox.warning(self, "Configuration Error", f"Could not load config: {e}\n\nUsing default values.")
             
     def save_current_config(self):
         """Save current settings to config file."""
         try:
+            # Validate and parse settings with bounds checking
+            threads = max(1, int(self.line_threads.text() or str(os.cpu_count() or 1)))
+            detrend_window = max(0.1, float(self.line_detrend.text() or "1.5"))
+            norm_window = max(0.1, float(self.line_norm.text() or "4"))
+            batch_size = max(1, int(self.line_batch.text() or "3000"))
+            cut_threshold = max(0.1, float(self.line_cut_threshold.text() or "7"))
+            
             config = {
                 "vr_mode": self.chk_vr.isChecked(),
                 "overwrite": self.chk_overwrite.isChecked(),
                 "pov_mode": self.chk_pov.isChecked(),
                 "keyframe_reduction": self.chk_keyframe.isChecked(),
-                "backend": self.combo_backend.currentText(),
-                "threads": int(self.line_threads.text() or "8"),
-                "detrend_window": float(self.line_detrend.text() or "120"),
-                "norm_window": float(self.line_norm.text() or "120"),
-                "batch_size": int(self.line_batch.text() or "50")
+                "backend": self.combo_backend.currentText().split(" ")[0],  # Remove "(unavailable)" suffix if present
+                "threads": threads,
+                "detrend_window": detrend_window,
+                "norm_window": norm_window,
+                "batch_size": batch_size,
+                "cut_threshold": cut_threshold
             }
             save_config(config)
+        except ValueError as e:
+            QMessageBox.warning(self, "Invalid Input", f"Please check your input values: {e}")
         except Exception as e:
-            print(f"Could not save config: {e}")
+            QMessageBox.critical(self, "Configuration Error", f"Could not save config: {e}")
             
     def select_files(self):
         """Select video files for processing."""

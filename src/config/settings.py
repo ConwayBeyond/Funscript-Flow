@@ -33,10 +33,10 @@ def load_config(config_path: str = "config.json") -> Dict[str, Any]:
 def get_default_settings() -> Dict[str, Any]:
     """Get default application settings."""
     return {
-        "threads": 1,
-        "detrend_window": 120,
-        "norm_window": 120,
-        "batch_size": 50,
+        "threads": os.cpu_count() or 1,
+        "detrend_window": 1.5,
+        "norm_window": 4,
+        "batch_size": 3000,
         "overwrite": False,
         "vr_mode": False,
         "pov_mode": False,
