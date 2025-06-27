@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QIcon
 
-from .cli.headless import run_headless
+from src.cli.headless import run_headless
 
 
 def main():
@@ -42,20 +42,20 @@ def main():
         run_headless(args.input, settings)
     else:
         # Import GUI here to avoid circular imports
-        from .gui.main_window import App
+        from src.gui.main_window import App
+        
+        # Set application properties before creating QApplication
+        QApplication.setApplicationName("Funscript Flow")
+        QApplication.setApplicationDisplayName("Funscript Flow")
+        QApplication.setOrganizationName("Funscript Flow")
         
         app = QApplication(sys.argv)
         
-        # Set application properties
-        app.setApplicationName("Funscript Flow")
-        app.setApplicationDisplayName("Funscript Flow")
-        app.setOrganizationName("Funscript Flow")
-        
         # Set application icon
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        icon_path = os.path.join(script_dir, "../../icon.png")
-        if os.path.exists(icon_path):
-            app.setWindowIcon(QIcon(icon_path))
+        from pathlib import Path
+        icon_path = Path(__file__).parent / "assets" / "icon.png"
+        if icon_path.exists():
+            app.setWindowIcon(QIcon(str(icon_path)))
         
         # Install signal handler for graceful shutdown
         signal.signal(signal.SIGINT, signal.SIG_DFL)

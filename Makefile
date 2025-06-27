@@ -6,7 +6,7 @@ ifeq ($(OS),Windows_NT)
 		--include-package=src \
 		--enable-plugin=pyside6 \
 		--windows-disable-console \
-		--windows-icon-from-ico=icon.ico \
+		--windows-icon-from-ico=src/assets/icon.ico \
 		--output-filename=FunscriptFlow.exe \
 		--output-dir=dist
     BUILD_MSG := Building Windows executable...
@@ -20,8 +20,10 @@ else
 			--include-package=src \
 			--enable-plugin=pyside6 \
 			--macos-create-app-bundle \
-			--macos-app-icon=icon.png \
+			--macos-app-icon=src/assets/icon.png \
 			--macos-app-name="Funscript Flow" \
+			--macos-bundle-identifier="com.funscriptflow.app" \
+			--output-filename=FunscriptFlow \
 			--output-dir=dist
         BUILD_MSG := Building macOS app bundle...
         BUILD_SUCCESS := Build complete! App bundle created in dist/
@@ -31,7 +33,7 @@ else
 			src/main.py \
 			--include-package=src \
 			--enable-plugin=pyside6 \
-			--linux-icon=icon.png \
+			--linux-icon=src/assets/icon.png \
 			--output-filename=FunscriptFlow \
 			--output-dir=dist
         BUILD_MSG := Building Linux executable...
