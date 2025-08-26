@@ -25,7 +25,6 @@ def load_strings(filename="strings.json"):
         "advanced_settings": "Advanced Settings",
         "threads": "Threads:",
         "detrend_window": "Detrend window (sec):",
-        
         "norm_window": "Norm window (sec):",
         "batch_size": "Batch size (frames):",
         "face_inversion": "Enable face‑based inversion",
@@ -49,6 +48,8 @@ def load_strings(filename="strings.json"):
         "face_inversion_tooltip": "Uses face detection to try to determine the angle of motion, and adjust direction accordingly.",
         "pov_mode_tooltip": "Use this to improve stability for POV videos.",
     }
+    # Ensure default strings are unicode (Python 3 str is unicode by default)
+    # For unicode filenames, always open files with encoding="utf-8" and use str everywhere.
     try:
         with open(filename, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -181,7 +182,7 @@ def max_divergence(flow):
     return x, y, div[y, x]
 
 
-def radial_motion_weighted(flow, center, is_cut, pov_mode=False):
+def radial_motion_weighted(flow, center, is_cut, pov_mode=False, balance_global=True):
     """
     Computes signed radial motion: positive for outward motion, negative for inward motion.
     Closer pixels have higher weight.
@@ -196,7 +197,7 @@ def radial_motion_weighted(flow, center, is_cut, pov_mode=False):
     dot = flow[..., 0] * dx + flow[..., 1] * dy
 
     # In POV mode, just return the mean dot product
-    if(pov_mode):
+    if(pov_mode or not balance_global):
         return np.mean(dot)
     
     #Cancel out global motion by balancing the averages
@@ -492,7 +493,7 @@ def process_video(video_path, params, log_func, progress_callback=None, cancel_f
         with concurrent.futures.ProcessPoolExecutor(max_workers=params["threads"]) as ex:
             dot_futures = []
             for j, info in enumerate(precomputed):
-                dot_futures.append(ex.submit(radial_motion_weighted, info["flow"], final_centers[j], info["cut"], params.get("pov_mode", False)))
+                dot_futures.append(ex.submit(radial_motion_weighted, info["flow"], final_centers[j], info["cut"], params.get("pov_mode", False), params.get("balance_global", True)))
             dot_vals = [f.result() for f in dot_futures]
 
 
@@ -874,6 +875,10 @@ class App:
         self.pov_mode = tk.BooleanVar(value=False)
         chk_pov = tk.Checkbutton(mode_frame, text="POV Mode", variable=self.pov_mode)
         chk_pov.pack(side=tk.LEFT, padx=2)
+        self.balance_global = tk.BooleanVar(value=True)
+        chk_balance = tk.Checkbutton(mode_frame, text="Balance Global Motion", variable=self.balance_global)
+        chk_balance.pack(side=tk.LEFT, padx=2)
+        ToolTip(chk_balance, "If enabled, the script will try to cancel out camera motion. Disable it for scenes with no camera movement.")
         ToolTip(chk_pov, STRINGS["pov_mode_tooltip"])
         
         adv_toggle_frame = tk.Frame(master)
@@ -1065,7 +1070,7 @@ class App:
                 log_path = os.path.join(os.getenv("APPDATA"), "FunscriptFlow")
             os.makedirs(log_path, exist_ok=True)
             log_filename = os.path.join(log_path, "run.log")
-            self.log_file = open(log_filename, "w")
+            self.log_file = open(log_filename, "w", encoding="utf-8")
         except Exception as e:
             messagebox.showerror("Log Error", f"Cannot open log file: {e}")
             return
