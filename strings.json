@@ -30,5 +30,7 @@
         "readme":"Readme",
         "show_preview":"Preview",
         "stabilization_interval":"Stabilization interval",
-        "processing_completed_with_errors": "Processing completed with errors. See run.log for details."
+        "processing_completed_with_errors": "Processing completed with errors. See run.log for details.",
+        "live_log": "Live Log",
+        "clear_log": "Clear Log"
     }

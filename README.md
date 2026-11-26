@@ -6,18 +6,43 @@ The easiest way is to [download it here](https://github.com/Funscript-Flow/Funsc
 
 **Running from Source**
 
-To run the code, you'll need the following pip packages installed.
+**Prerequisites:** Python 3.13 or higher
 
-* scipy
-* numpy
-* decord
-* opencv
+**Using uv (recommended):**
+```bash
+# Install uv if you don't have it
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-After that, just run the .pyw file.
-
-**Building an exe from source:**
+# Install dependencies and run
+uv run FunscriptFlow.pyw
 ```
-  python -m nuitka .\FunscriptFlow.pyw --standalone --enable-plugin=tk-inter --windows-disable-console --windows-icon-from-ico=icon.ico
+
+**Using pip:**
+```bash
+pip install numpy opencv-python
+python FunscriptFlow.pyw
+```
+
+**Building Standalone Executables:**
+
+First install build dependencies:
+```bash
+uv sync --extra build
+```
+
+**Windows:**
+```bash
+uv run nuitka FunscriptFlow.pyw --standalone --enable-plugin=tk-inter --windows-disable-console --windows-icon-from-ico=icon.ico
+```
+
+**macOS:**
+```bash
+uv run nuitka FunscriptFlow.pyw --standalone --enable-plugin=tk-inter --macos-create-app-bundle --macos-app-icon=icon.png
+```
+
+**Linux:**
+```bash
+uv run nuitka FunscriptFlow.pyw --standalone --enable-plugin=tk-inter --linux-icon=icon.png
 ```
 
 **Features**
